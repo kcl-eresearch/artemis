@@ -7,8 +7,10 @@ Artemis provides a Perplexity-compatible API interface over SearXNG. Use it as a
 - **Perplexity-compatible API** - Drop-in replacement for Perplexity clients
 - **SearXNG backend** - Your own search instance, no external dependencies
 - **Deep research mode** - Multi-stage adaptive research with essay synthesis
+- **Content extraction** - Fetches full page content via Playwright (headless Chromium) + trafilatura, with LLM-based relevance selection to extract only the most useful pages
+- **Streaming** - Real-time progress events via `streaming: true` on `/v1/responses`
 - **LLM summarization** - Optional AI-powered summary of search results
-- **Production controls** - Optional bearer auth, validated config, configurable CORS, and upstream timeout handling
+- **Production controls** - Optional bearer auth, validated config, configurable CORS, circuit breaker for LLM failures, and upstream timeout handling
 
 ## Quick Start
 
@@ -124,7 +126,22 @@ curl -X POST http://localhost:8000/v1/responses \
   }'
 ```
 
-Response includes the essay and all sources.
+### Streaming (`POST /v1/responses` with `streaming: true`)
+
+```bash
+curl -N -X POST http://localhost:8000/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <your-api-key>" \
+  -d '{
+    "input": "Research topic: the future of AI in healthcare",
+    "preset": "deep-research",
+    "streaming": true
+  }'
+```
+
+Progress events are streamed in real-time as plain text, followed by the final essay.
+
+For non-streaming requests, the response includes the essay and all sources as JSON.
 
 ## Request Parameters
 
@@ -144,6 +161,7 @@ Response includes the essay and all sources.
 | `preset` | string | No | `fast-search` (default) or `deep-research` |
 | `max_steps` | integer | No | Override `DEEP_RESEARCH_STAGES` per-request (1-10, deep-research only) |
 | `outline` | array | No | Custom outline sections. Each: `{"section": "Name", "description": "..."}`. Overrides `DEEP_RESEARCH_STAGES`. |
+| `streaming` | boolean | No | Stream progress events in real-time (default: `false`) |
 
 Deep research config via environment:
 - `DEEP_RESEARCH_STAGES` - Number of outline sections (default: 2)
@@ -190,8 +208,10 @@ python3 -m tests.test
 ## Operational Notes
 
 - `/health` reports service health plus whether auth and summarization are enabled
-- Summary failures degrade gracefully and return warnings instead of leaking raw upstream errors
+- Summary failures degrade gracefully via a circuit breaker pattern — after 3 consecutive LLM failures, summarization is temporarily disabled for 5 minutes
 - Deep research supports per-request `max_steps` (1-10) and reports aggregated token usage
+- Content extraction uses LLM-based relevance selection to pick the best results per section before running expensive Playwright page fetches
+- Playwright browser initialization is concurrency-safe (uses an asyncio lock to prevent duplicate launches)
 - The container runs as a non-root user and includes a Docker healthcheck
 
 ## License

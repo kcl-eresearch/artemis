@@ -429,6 +429,7 @@ async def deep_research(
     all_results: list[SearchResult] = []
     all_sub_queries: list[str] = []
     section_results: dict[str, list[SearchResult]] = {}
+    total_search_requests = 0
 
     # Progress callback helper
     def _progress(stage: str, message: str):
@@ -562,6 +563,7 @@ async def deep_research(
                     all_queries.append(q)
         
         if all_queries:
+            total_search_requests += len(all_queries)
             search_tasks = [search_and_collect(q, results_per_query) for q in all_queries]
             all_search_results = await asyncio.gather(
                 *search_tasks, return_exceptions=True
@@ -690,6 +692,17 @@ async def deep_research(
         content_map=content_map or None,
     )
     _merge_usage(total_usage, usage.model_dump())
+
+    # Estimate citation tokens from search content fed to the LLM
+    citation_chars = 0
+    for item in outline:
+        section = item["section"]
+        results = final_section_results.get(section, [])
+        citation_chars += len(
+            format_results_for_synthesis(results, content_map=content_map or None)
+        )
+    total_usage.citation_tokens = citation_chars // 4 if citation_chars else 0
+    total_usage.search_requests = total_search_requests
 
     _progress("complete", f"Research complete! Generated {len(essay)} char essay from {len(unique_results)} sources")
     return DeepResearchRun(

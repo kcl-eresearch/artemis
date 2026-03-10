@@ -291,6 +291,7 @@ async def _stream_responses(request: ResponsesRequest) -> StreamingResponse:
 
             yield research_run.essay
             yield f"\n\n[Found {len(research_run.results)} sources]"
+            yield f"\n[USAGE] {research_run.usage.model_dump_json()}"
         else:
             yield "[Searching...]\n"
             results = await search_searxng(query=request.input, max_results=10)
@@ -407,6 +408,12 @@ async def search(request: SearchRequest) -> SearchResponse:
 
     summary, usage, warnings = await _build_summary(request.query, results)
 
+    # Enrich usage with search-specific metrics
+    if usage is not None:
+        usage.search_requests = 1
+        citation_chars = sum(len(r.snippet or "") + len(r.title) for r in results)
+        usage.citation_tokens = citation_chars // 4
+
     return SearchResponse(
         id=str(uuid.uuid4()),
         results=results,
@@ -451,6 +458,11 @@ async def responses(request: ResponsesRequest) -> ResponsesAPIResponse | Streami
     results = await search_searxng(query=request.input, max_results=10)
     summary, usage, warnings = await _build_summary(request.input, results)
 
+    response_usage = usage or TokenUsage()
+    response_usage.search_requests = 1
+    citation_chars = sum(len(r.snippet or "") + len(r.title) for r in results)
+    response_usage.citation_tokens = citation_chars // 4
+
     return ResponsesAPIResponse(
         id=str(uuid.uuid4()),
         created=_created_timestamp(),
@@ -459,7 +471,7 @@ async def responses(request: ResponsesRequest) -> ResponsesAPIResponse | Streami
             _message_output(summary or _fallback_text(results)),
             SearchResultsBlock(results=_result_items(results)),
         ],
-        usage=usage or TokenUsage(),
+        usage=response_usage,
         warnings=warnings,
     )
 

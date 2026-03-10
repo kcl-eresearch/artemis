@@ -11,7 +11,7 @@ ensure API contracts are enforced at runtime.
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
 
 
 class SearchResult(BaseModel):
@@ -39,15 +39,41 @@ class TokenUsage(BaseModel):
     Tracks input, output, and total tokens used across all LLM requests
     in a single operation. Default values are 0 for easy aggregation.
 
+    Includes both OpenAI Responses API field names (input_tokens/output_tokens)
+    and Chat Completions API field names (prompt_tokens/completion_tokens) so
+    LiteLLM billing can read usage from either format.
+
+    Also tracks search-specific usage for LiteLLM web search billing:
+    - search_requests: Number of upstream search API calls made
+    - citation_tokens: Estimated tokens from search content injected into LLM prompts
+
     Attributes:
         input_tokens: Tokens sent in the prompt/request
         output_tokens: Tokens received in the completion/response
         total_tokens: Sum of input and output tokens
+        search_requests: Number of search API calls made
+        citation_tokens: Estimated tokens from search-derived content
+        prompt_tokens: Alias of input_tokens (Chat Completions API format)
+        completion_tokens: Alias of output_tokens (Chat Completions API format)
     """
 
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
+    search_requests: int = 0
+    citation_tokens: int = 0
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def prompt_tokens(self) -> int:
+        """Chat Completions API alias for input_tokens."""
+        return self.input_tokens
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def completion_tokens(self) -> int:
+        """Chat Completions API alias for output_tokens."""
+        return self.output_tokens
 
 
 class SearchRequest(BaseModel):
