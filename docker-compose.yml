@@ -1,0 +1,43 @@
+version: "3.8"
+
+services:
+  searxng:
+    image: searxng/searxng:latest
+    ports:
+      - "8888:8080"
+    volumes:
+      - ./searxng.yml:/etc/searxng/settings.yml:ro
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8888
+    cap_add:
+      - SYS_ADMIN
+    networks:
+      - searxng-net
+    restart: unless-stopped
+
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - SEARXNG_API_BASE=http://searxng:8080
+      - ALLOWED_ORIGINS=http://localhost:3000
+      - ARTEMIS_API_KEY=${ARTEMIS_API_KEY:-}
+      - ENABLE_SUMMARY=true
+      - SUMMARY_MODEL=openai/gpt-4o-mini
+      # Add your API key:
+      # - OPENAI_API_KEY=sk-...
+    depends_on:
+      - searxng
+    networks:
+      - searxng-net
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 4G
+
+networks:
+  searxng-net:
+    driver: bridge

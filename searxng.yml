@@ -1,0 +1,33 @@
+general:
+  debug: false
+  instance_name: "searxng"
+  contact_instance: ""
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: en
+  formats:
+    - html
+    - json
+
+server:
+  bind:
+    - 0.0.0.0:8080
+  limiter: false
+  image_proxy: false
+  http_protocol_version: "1.1"
+
+ui:
+  static_use_hash: true
+  default_theme: simple
+  themes:
+    - simple
+
+engines:
+  - name: google
+    engine: google
+    shortcut: g
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg

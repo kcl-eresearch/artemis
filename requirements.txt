@@ -1,0 +1,7 @@
+fastapi>=0.109.0,<1.0.0
+uvicorn>=0.27.0,<1.0.0
+httpx>=0.26.0,<1.0.0
+pydantic>=2.5.0,<3.0.0
+python-dotenv>=1.0.0,<2.0.0
+trafilatura>=2.0.0,<3.0.0
+playwright>=1.40.0,<2.0.0
