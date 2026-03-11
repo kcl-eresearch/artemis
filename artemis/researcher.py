@@ -343,42 +343,6 @@ Make it as long as necessary to cover all the information gathered."""
     return completion["content"], usage
 
 
-# Legacy function for backward compatibility
-async def synthesize_essay(
-    topic: str,
-    all_results: list[SearchResult],
-    sub_queries: list[str],
-    max_tokens: int,
-) -> tuple[str, TokenUsage]:
-    """Synthesize all research findings into a comprehensive essay (legacy)."""
-    settings = get_settings()
-    results_text = format_results_for_synthesis(all_results)
-
-    system = """You are a research synthesis specialist. Write a comprehensive, well-structured research report on the topic provided by the user.
-
-Write a thorough research report that:
-1. Has a clear introduction explaining the topic
-2. Covers all aspects explored by the search queries
-3. Synthesizes information from multiple sources
-4. Uses inline citations like [1], [2], etc. referencing the URLs
-5. Has substantive sections exploring each facet
-6. Ends with a conclusion summarizing key findings
-7. Note any conflicting information or disagreements between sources
-
-The report should be detailed and comprehensive."""
-
-    user = f"Topic: {topic}\n\nSearch queries used:\n{chr(10).join(f'- {q}' for q in sub_queries)}"
-
-    messages = build_tool_messages(
-        system=system,
-        user=user,
-        tool_content=results_text,
-    )
-
-    completion = await chat_completion(messages=messages, model=settings.summary_model, max_tokens=max_tokens)
-    usage = TokenUsage.model_validate(completion["usage"] or {})
-    return completion["content"], usage
-
 
 def _deduplicate_results(results: list[SearchResult]) -> list[SearchResult]:
     """Remove duplicate results based on URL."""
