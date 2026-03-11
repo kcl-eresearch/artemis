@@ -86,6 +86,14 @@ class _ResponseStub:
 
 
 class SearchErrorPathsTestCase(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        # Disable search cache so each test hits the mock HTTP client directly
+        self._cache_patch = patch("artemis.searcher._get_search_cache", return_value=None)
+        self._cache_patch.start()
+
+    def tearDown(self) -> None:
+        self._cache_patch.stop()
+
     @patch("artemis.searcher._get_client")
     async def test_timeout_raises_upstream_error(self, mock_get_client: MagicMock) -> None:
         mock_client = AsyncMock()

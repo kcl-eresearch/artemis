@@ -257,6 +257,10 @@ class Settings:
         allowed_origins: CORS-allowed origins (empty = browser clients blocked)
         artemis_api_key: Bearer token for API authentication (optional)
         log_level: Python logging level
+        cache_enabled: Whether in-memory caching is enabled
+        search_cache_ttl_seconds: TTL for cached search results
+        content_cache_ttl_seconds: TTL for cached extracted page content
+        cache_max_entries: Maximum entries per cache before oldest are evicted
     """
 
     searxng_api_base: str
@@ -286,6 +290,10 @@ class Settings:
     allowed_origins: tuple[str, ...]
     artemis_api_key: str | None
     log_level: str
+    cache_enabled: bool
+    search_cache_ttl_seconds: int
+    content_cache_ttl_seconds: int
+    cache_max_entries: int
 
 
 @lru_cache(maxsize=1)
@@ -376,6 +384,16 @@ def get_settings() -> Settings:
         allowed_origins=_parse_allowed_origins(),
         artemis_api_key=_parse_optional_str("ARTEMIS_API_KEY"),
         log_level=_parse_log_level("LOG_LEVEL"),
+        cache_enabled=_parse_bool("CACHE_ENABLED", True),
+        search_cache_ttl_seconds=_parse_int(
+            "SEARCH_CACHE_TTL_SECONDS", 3600, minimum=0, maximum=86400
+        ),
+        content_cache_ttl_seconds=_parse_int(
+            "CONTENT_CACHE_TTL_SECONDS", 86400, minimum=0, maximum=604800
+        ),
+        cache_max_entries=_parse_int(
+            "CACHE_MAX_ENTRIES", 1000, minimum=10, maximum=100000
+        ),
     )
 
 

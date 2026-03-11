@@ -5,6 +5,7 @@ This module provides the core search integration with SearXNG. It handles:
 - Making async HTTP requests to SearXNG
 - Parsing and normalizing search results
 - Domain filtering functionality
+- Caching with request coalescing to avoid duplicate searches
 
 The main entry point is search_searxng(), which returns a list of SearchResult
 objects ready for use in API responses or further processing.
@@ -12,12 +13,15 @@ objects ready for use in API responses or further processing.
 A module-level httpx.AsyncClient is used for connection pooling across requests.
 """
 
+import hashlib
+import json
 import logging
 from typing import Optional
 from urllib.parse import urlparse
 
 import httpx
 
+from artemis.cache import AsyncTTLCache
 from artemis.config import get_settings
 from artemis.errors import UpstreamServiceError
 from artemis.models import SearchResult
@@ -26,6 +30,9 @@ logger = logging.getLogger(__name__)
 
 # Module-level client for connection pooling (created lazily)
 _client: httpx.AsyncClient | None = None
+
+# Module-level search cache (created lazily based on config)
+_search_cache: AsyncTTLCache[list[SearchResult]] | None = None
 
 
 def _get_client() -> httpx.AsyncClient:
@@ -46,11 +53,58 @@ def _get_client() -> httpx.AsyncClient:
 
 
 async def close_client() -> None:
-    """Close the shared httpx client (called during app shutdown)."""
-    global _client
+    """Close the shared httpx client and clear cache (called during app shutdown)."""
+    global _client, _search_cache
     if _client is not None and not _client.is_closed:
         await _client.aclose()
         _client = None
+    if _search_cache is not None:
+        logger.info(
+            "Search cache stats: hits=%d misses=%d coalesced=%d hit_rate=%.1f%%",
+            _search_cache.stats.hits,
+            _search_cache.stats.misses,
+            _search_cache.stats.coalesced,
+            _search_cache.stats.hit_rate * 100,
+        )
+        _search_cache.clear()
+        _search_cache = None
+
+
+def _get_search_cache() -> AsyncTTLCache[list[SearchResult]] | None:
+    """Return the search cache if caching is enabled, creating lazily."""
+    global _search_cache
+    settings = get_settings()
+    if not settings.cache_enabled:
+        return None
+    if _search_cache is None:
+        _search_cache = AsyncTTLCache(
+            ttl_seconds=settings.search_cache_ttl_seconds,
+            max_entries=settings.cache_max_entries,
+            name="search",
+        )
+    return _search_cache
+
+
+def _make_search_cache_key(
+    query: str,
+    categories: Optional[str],
+    engines: Optional[str],
+    language: Optional[str],
+    pageno: Optional[int],
+    time_range: Optional[str],
+    safesearch: Optional[int],
+    max_results: Optional[int],
+    domain_filter: Optional[list[str]],
+) -> str:
+    """Build a deterministic cache key from search parameters."""
+    # Normalize domain_filter to sorted tuple for consistent hashing
+    df = tuple(sorted(domain_filter)) if domain_filter else ()
+    key_data = json.dumps(
+        [query, categories, engines, language, pageno, time_range,
+         safesearch, max_results, df],
+        sort_keys=True,
+    )
+    return hashlib.sha256(key_data.encode()).hexdigest()
 
 
 def _normalize_domain(domain: str) -> str:
@@ -160,6 +214,47 @@ async def search_searxng(
     Raises:
         UpstreamServiceError: If SearXNG is unreachable or returns invalid data
     """
+    settings = get_settings()
+
+    # Check cache first
+    cache = _get_search_cache()
+    cache_key = _make_search_cache_key(
+        query, categories, engines, language, pageno,
+        time_range, safesearch, max_results, domain_filter,
+    ) if cache is not None else ""
+
+    if cache is not None:
+        async def _fetch() -> list[SearchResult]:
+            return await _search_searxng_uncached(
+                query, categories, engines, language, pageno,
+                time_range, format, safesearch, image_proxy,
+                autocomplete, results_on_new_tab, max_results, domain_filter,
+            )
+        return await cache.get_or_fetch(cache_key, _fetch)
+
+    return await _search_searxng_uncached(
+        query, categories, engines, language, pageno,
+        time_range, format, safesearch, image_proxy,
+        autocomplete, results_on_new_tab, max_results, domain_filter,
+    )
+
+
+async def _search_searxng_uncached(
+    query: str,
+    categories: Optional[str] = None,
+    engines: Optional[str] = None,
+    language: Optional[str] = "en",
+    pageno: Optional[int] = 1,
+    time_range: Optional[str] = None,
+    format: str = "json",
+    safesearch: Optional[int] = None,
+    image_proxy: Optional[bool] = None,
+    autocomplete: Optional[str] = None,
+    results_on_new_tab: Optional[int] = None,
+    max_results: Optional[int] = 10,
+    domain_filter: Optional[list[str]] = None,
+) -> list[SearchResult]:
+    """Execute a search against SearXNG without caching."""
     settings = get_settings()
     params = {
         "q": query,

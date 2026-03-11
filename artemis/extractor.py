@@ -7,9 +7,14 @@ avoids 403s from TLS fingerprinting and JS-challenge bot detection.
 The module provides:
 - fetch_and_extract(): Fetch a single URL and extract its content
 - enrich_results(): Batch-enrich a list of SearchResult URLs
+
+Extracted content is cached in-memory with request coalescing — if
+multiple researchers request the same URL concurrently, only one
+Playwright fetch is performed.
 """
 
 import asyncio
+import hashlib
 import logging
 from typing import Optional
 from urllib.parse import urlparse
@@ -17,6 +22,8 @@ from urllib.parse import urlparse
 import trafilatura
 from playwright.async_api import async_playwright, Browser, BrowserContext
 
+from artemis.cache import AsyncTTLCache
+from artemis.config import get_settings
 from artemis.models import SearchResult
 
 logger = logging.getLogger(__name__)
@@ -26,6 +33,9 @@ _browser: Browser | None = None
 _context: BrowserContext | None = None
 _pw_instance = None  # Playwright instance holder
 _launch_lock = asyncio.Lock()
+
+# Module-level content cache (created lazily based on config)
+_content_cache: AsyncTTLCache[Optional[str]] | None = None
 
 # Domains known to require login (paywall) — not even a real browser helps
 _BLOCKED_DOMAINS: frozenset[str] = frozenset({
@@ -92,8 +102,8 @@ async def _get_context() -> BrowserContext:
 
 
 async def close_client() -> None:
-    """Shut down the Playwright browser (called during app shutdown)."""
-    global _browser, _context, _pw_instance
+    """Shut down the Playwright browser and clear cache (called during app shutdown)."""
+    global _browser, _context, _pw_instance, _content_cache
     logger.info("Shutting down Playwright browser")
     if _context is not None:
         await _context.close()
@@ -104,7 +114,37 @@ async def close_client() -> None:
     if _pw_instance is not None:
         await _pw_instance.stop()
         _pw_instance = None
+    if _content_cache is not None:
+        logger.info(
+            "Content cache stats: hits=%d misses=%d coalesced=%d hit_rate=%.1f%%",
+            _content_cache.stats.hits,
+            _content_cache.stats.misses,
+            _content_cache.stats.coalesced,
+            _content_cache.stats.hit_rate * 100,
+        )
+        _content_cache.clear()
+        _content_cache = None
     logger.info("Playwright browser shut down")
+
+
+def _get_content_cache() -> AsyncTTLCache[Optional[str]] | None:
+    """Return the content cache if caching is enabled, creating lazily."""
+    global _content_cache
+    settings = get_settings()
+    if not settings.cache_enabled:
+        return None
+    if _content_cache is None:
+        _content_cache = AsyncTTLCache(
+            ttl_seconds=settings.content_cache_ttl_seconds,
+            max_entries=settings.cache_max_entries,
+            name="content",
+        )
+    return _content_cache
+
+
+def _make_content_cache_key(url: str, max_chars: int) -> str:
+    """Build a deterministic cache key for content extraction."""
+    return hashlib.sha256(f"{url}|{max_chars}".encode()).hexdigest()
 
 
 async def fetch_page(url: str, timeout: float = 15.0) -> Optional[str]:
@@ -183,6 +223,10 @@ async def fetch_and_extract(
 ) -> Optional[str]:
     """Fetch a URL and extract its main content.
 
+    Results are cached by (url, max_chars) with request coalescing — if
+    multiple coroutines request the same URL concurrently, only one
+    Playwright fetch is performed.
+
     Args:
         url: The URL to fetch and extract
         max_chars: Maximum characters of extracted text
@@ -191,6 +235,22 @@ async def fetch_and_extract(
     Returns:
         Extracted text, or None on failure
     """
+    cache = _get_content_cache()
+    if cache is not None:
+        cache_key = _make_content_cache_key(url, max_chars)
+
+        async def _fetch() -> Optional[str]:
+            return await _fetch_and_extract_uncached(url, max_chars, timeout)
+
+        return await cache.get_or_fetch(cache_key, _fetch)
+
+    return await _fetch_and_extract_uncached(url, max_chars, timeout)
+
+
+async def _fetch_and_extract_uncached(
+    url: str, max_chars: int = 3000, timeout: float = 15.0
+) -> Optional[str]:
+    """Fetch a URL and extract its main content (no caching)."""
     html = await fetch_page(url, timeout=timeout)
     if html is None:
         return None

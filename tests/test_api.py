@@ -60,6 +60,10 @@ class APITestCase(unittest.TestCase):
                 allowed_origins=tuple(),
                 artemis_api_key="secret-token",
                 log_level="INFO",
+                cache_enabled=True,
+                search_cache_ttl_seconds=3600,
+                content_cache_ttl_seconds=86400,
+                cache_max_entries=1000,
             ),
         ):
             unauthorized = self.client.post("/search", json={"query": "fastapi"})
@@ -118,6 +122,10 @@ class APITestCase(unittest.TestCase):
             allowed_origins=tuple(),
             artemis_api_key=None,
             log_level="INFO",
+            cache_enabled=True,
+            search_cache_ttl_seconds=3600,
+            content_cache_ttl_seconds=86400,
+            cache_max_entries=1000,
         )
 
         with patch("artemis.main.get_settings", return_value=settings):
@@ -183,6 +191,10 @@ class APITestCase(unittest.TestCase):
                 allowed_origins=tuple(),
                 artemis_api_key=None,
                 log_level="INFO",
+                cache_enabled=True,
+                search_cache_ttl_seconds=3600,
+                content_cache_ttl_seconds=86400,
+                cache_max_entries=1000,
             ),
         ):
             response = self.client.post(

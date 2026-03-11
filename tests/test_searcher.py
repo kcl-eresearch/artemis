@@ -19,6 +19,14 @@ class _ResponseStub:
 
 
 class SearcherTestCase(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        # Disable search cache so each test hits the mock HTTP client directly
+        self._cache_patch = patch("artemis.searcher._get_search_cache", return_value=None)
+        self._cache_patch.start()
+
+    def tearDown(self) -> None:
+        self._cache_patch.stop()
+
     @patch("artemis.searcher._get_client")
     async def test_domain_filter_is_applied_before_result_limit(
         self, mock_get_client

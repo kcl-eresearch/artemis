@@ -52,6 +52,10 @@ def _default_settings(**overrides) -> Settings:
         allowed_origins=tuple(),
         artemis_api_key=None,
         log_level="INFO",
+        cache_enabled=True,
+        search_cache_ttl_seconds=3600,
+        content_cache_ttl_seconds=86400,
+        cache_max_entries=1000,
     )
     defaults.update(overrides)
     return Settings(**defaults)
