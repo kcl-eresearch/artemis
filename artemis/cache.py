@@ -25,6 +25,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Generic, TypeVar
 
+_MISSING = object()  # sentinel to distinguish "not in cache" from cached None
+
 logger = logging.getLogger(__name__)
 
 V = TypeVar("V")
@@ -109,15 +111,22 @@ class AsyncTTLCache(Generic[V]):
             del self._data[k]
         self.stats.evictions += to_evict
 
-    def get(self, key: str) -> V | None:
-        """Return cached value if present and not expired, else None."""
+    def _get_value(self, key: str) -> object:
+        """Return cached value or _MISSING sentinel if not present/expired."""
         entry = self._data.get(key)
         if entry is None:
-            return None
+            return _MISSING
         if self._is_expired(entry):
             del self._data[key]
-            return None
+            return _MISSING
         return entry.value
+
+    def get(self, key: str) -> V | None:
+        """Return cached value if present and not expired, else None."""
+        result = self._get_value(key)
+        if result is _MISSING:
+            return None
+        return result  # type: ignore[return-value]
 
     def put(self, key: str, value: V) -> None:
         """Store a value with TTL-based expiry."""
@@ -152,19 +161,19 @@ class AsyncTTLCache(Generic[V]):
             Any exception raised by *factory* (propagated to all waiters).
         """
         # Fast path — no lock needed for reads
-        cached = self.get(key)
-        if cached is not None:
+        cached = self._get_value(key)
+        if cached is not _MISSING:
             self.stats.hits += 1
-            return cached
+            return cached  # type: ignore[return-value]
 
         # Determine if we should fetch or wait for an in-flight request
         should_fetch = False
         async with self._lock:
             # Double-check after acquiring lock
-            cached = self.get(key)
-            if cached is not None:
+            cached = self._get_value(key)
+            if cached is not _MISSING:
                 self.stats.hits += 1
-                return cached
+                return cached  # type: ignore[return-value]
 
             future = self._in_flight.get(key)
             if future is not None:
