@@ -20,7 +20,7 @@ from artemis.config import (
 )
 from artemis.errors import UpstreamServiceError
 from artemis.extractor import enrich_results
-from artemis.llm import chat_completion
+from artemis.llm import build_tool_messages, chat_completion, sanitize_content
 from artemis.models import DeepResearchRun, SearchResult, TokenUsage
 from artemis.searcher import search_searxng
 
@@ -162,9 +162,8 @@ def _parse_outline(raw_content: str) -> list[dict[str, str]]:
 async def generate_outline(topic: str, num_sections: int = 5) -> tuple[list[dict[str, str]], TokenUsage]:
     """Generate a research outline with sections to cover."""
     settings = get_settings()
-    prompt = f"""You are a research planning specialist. Create an outline for a comprehensive research report on the following topic.
-
-Topic: {topic}
+    system = "You are a research planning specialist. Create an outline for a comprehensive research report on the topic provided by the user."
+    user = f"""Topic: {topic}
 
 Generate exactly {num_sections} main sections that need to be covered for a thorough research report.
 Each section should cover a distinct aspect of the topic.
@@ -178,10 +177,12 @@ Example:
 ]"""
 
     completion = await chat_completion(
-        prompt=prompt,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
         model=settings.summary_model,
         max_tokens=4000,
-        
     )
     outline = _parse_outline(completion["content"])
     usage = TokenUsage.model_validate(completion["usage"] or {})
@@ -201,9 +202,8 @@ async def generate_subqueries_for_section(
     existing_str = f"\nAlready explored: {', '.join(existing_queries)}" if existing_queries else ""
     results_context = f"\nWhat we've found so far:\n{results_summary}" if results_summary else ""
 
-    prompt = f"""You are a research query decomposition specialist. Generate search queries to research a specific section of a report.
-
-Overall Topic: {topic}
+    system = "You are a research query decomposition specialist. Generate search queries to research a specific section of a report."
+    user = f"""Overall Topic: {topic}
 Section: {section}
 Section Description: {description}
 {existing_str}{results_context}
@@ -215,10 +215,12 @@ Respond with ONLY a JSON array of strings, nothing else.
 Example: ["specific aspect query", "another aspect query"]"""
 
     completion = await chat_completion(
-        prompt=prompt,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
         model=settings.summary_model,
         max_tokens=2000,
-        
     )
     queries = _parse_query_list(completion["content"])
     usage = TokenUsage.model_validate(completion["usage"] or {})
@@ -235,16 +237,12 @@ async def generate_refined_queries(
     """Generate refined queries based on current findings."""
     settings = get_settings()
     
-    # Summarize current findings
+    # Summarize current findings (untrusted web content)
     findings = format_results_for_synthesis(current_results[:10])
     
-    prompt = f"""You are a research query refinement specialist. Based on initial findings, generate better follow-up queries.
-
-Topic: {topic}
+    system = "You are a research query refinement specialist. Based on initial findings returned by the web_search tool, generate better follow-up queries."
+    user = f"""Topic: {topic}
 Section: {section}
-
-Current Findings:
-{findings}
 
 Already Explored Queries: {', '.join(existing_queries)}
 
@@ -254,11 +252,16 @@ Respond with ONLY a JSON array of strings.
 
 Example: ["deeper aspect query", "contradiction check query"]"""
 
+    messages = build_tool_messages(
+        system=system,
+        user=user,
+        tool_content=findings,
+    )
+
     completion = await chat_completion(
-        prompt=prompt,
+        messages=messages,
         model=settings.summary_model,
         max_tokens=2000,
-        
     )
     queries = _parse_query_list(completion["content"])
     usage = TokenUsage.model_validate(completion["usage"] or {})
@@ -278,11 +281,15 @@ def format_results_for_synthesis(
 
     When content_map is provided, uses extracted page content instead of
     the short search snippet, giving the LLM much richer source material.
+
+    All untrusted fields are sanitised to strip control characters.
     """
     parts = []
     for r in results:
         body = (content_map or {}).get(r.url, r.snippet)
-        parts.append(f"Title: {r.title}\nURL: {r.url}\nContent: {body}\n")
+        title = sanitize_content(r.title, max_length=200)
+        body = sanitize_content(body)
+        parts.append(f"Title: {title}\nURL: {r.url}\nContent: {body}\n")
     return "\n---\n".join(parts)
 
 
@@ -309,15 +316,7 @@ async def synthesize_essay_with_outline(
     sections_block = "\n\n".join(sections_text)
     outline_str = "\n".join(f"- {item['section']}: {item['description']}" for item in outline)
 
-    prompt = f"""You are a research synthesis specialist. Write a comprehensive, well-structured research report following the provided outline.
-
-Topic: {topic}
-
-Report Outline:
-{outline_str}
-
-Research findings organized by section:
-{sections_block}
+    system = """You are a research synthesis specialist. Write a comprehensive, well-structured research report following the provided outline.
 
 Write a thorough research report that:
 1. Has a clear introduction explaining the topic
@@ -329,11 +328,17 @@ Write a thorough research report that:
 7. Note any conflicting information or disagreements between sources
 
 The report should be detailed and comprehensive.
-Make it as long as necessary to cover all the information gathered.
+Make it as long as necessary to cover all the information gathered."""
 
-Report:"""
+    user = f"Topic: {topic}\n\nReport Outline:\n{outline_str}"
 
-    completion = await chat_completion(prompt=prompt, model=settings.summary_model, max_tokens=max_tokens)
+    messages = build_tool_messages(
+        system=system,
+        user=user,
+        tool_content=sections_block,
+    )
+
+    completion = await chat_completion(messages=messages, model=settings.summary_model, max_tokens=max_tokens)
     usage = TokenUsage.model_validate(completion["usage"] or {})
     return completion["content"], usage
 
@@ -349,15 +354,7 @@ async def synthesize_essay(
     settings = get_settings()
     results_text = format_results_for_synthesis(all_results)
 
-    prompt = f"""You are a research synthesis specialist. Write a comprehensive, well-structured research report on the following topic.
-
-Topic: {topic}
-
-Search queries used:
-{chr(10).join(f"- {q}" for q in sub_queries)}
-
-Research findings:
-{results_text}
+    system = """You are a research synthesis specialist. Write a comprehensive, well-structured research report on the topic provided by the user.
 
 Write a thorough research report that:
 1. Has a clear introduction explaining the topic
@@ -368,11 +365,17 @@ Write a thorough research report that:
 6. Ends with a conclusion summarizing key findings
 7. Note any conflicting information or disagreements between sources
 
-The report should be detailed and comprehensive.
+The report should be detailed and comprehensive."""
 
-Report:"""
+    user = f"Topic: {topic}\n\nSearch queries used:\n{chr(10).join(f'- {q}' for q in sub_queries)}"
 
-    completion = await chat_completion(prompt=prompt, model=settings.summary_model, max_tokens=max_tokens)
+    messages = build_tool_messages(
+        system=system,
+        user=user,
+        tool_content=results_text,
+    )
+
+    completion = await chat_completion(messages=messages, model=settings.summary_model, max_tokens=max_tokens)
     usage = TokenUsage.model_validate(completion["usage"] or {})
     return completion["content"], usage
 
@@ -767,25 +770,29 @@ async def select_relevant_results(
     settings = get_settings()
 
     results_text = "\n".join(
-        f"{i}. Title: {r.title}\n   URL: {r.url}\n   Snippet: {r.snippet}"
+        f"{i}. Title: {sanitize_content(r.title, max_length=200)}\n   URL: {r.url}\n   Snippet: {sanitize_content(r.snippet, max_length=500)}"
         for i, r in enumerate(results)
     )
 
-    prompt = f"""Select the {max_results} most relevant search results for content extraction.
+    system = "You are a research result selection specialist. Select the most relevant search results for content extraction based on the topic and section described by the user."
+    user = f"""Select the {max_results} most relevant search results for content extraction.
 
 Topic: {topic}
 Section: {section}
 Description: {description}
 
-Results:
-{results_text}
-
 Return ONLY a JSON array of the result indices (0-based) for the most relevant results.
 Example: [0, 2, 5]"""
 
+    messages = build_tool_messages(
+        system=system,
+        user=user,
+        tool_content=results_text,
+    )
+
     try:
         completion = await chat_completion(
-            prompt=prompt,
+            messages=messages,
             model=settings.summary_model,
             max_tokens=200,
         )

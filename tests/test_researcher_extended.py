@@ -210,8 +210,10 @@ class GenerateSubqueriesTestCase(unittest.IsolatedAsyncioTestCase):
             topic="AI", section="S", description="D", num_queries=1,
             existing_queries=["old query 1", "old query 2"]
         )
-        prompt = mock_llm.call_args[1]["prompt"]
-        self.assertIn("old query 1", prompt)
+        # Existing queries appear in the user message
+        messages = mock_llm.call_args[1]["messages"]
+        user_msg = next(m["content"] for m in messages if m["role"] == "user")
+        self.assertIn("old query 1", user_msg)
 
 
 class DeepResearchOrchestrationTestCase(unittest.IsolatedAsyncioTestCase):

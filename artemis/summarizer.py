@@ -4,14 +4,15 @@ This module provides LLM-powered summarization of search results. Given a
 search query and a list of results, it uses an LLM to generate a concise
 summary that addresses the user's information needs.
 
-The summarization prompt is designed to produce well-structured responses
-that cite sources and directly answer the original query.
+Search result content (titles, URLs, snippets) is delivered to the LLM via
+tool-call messages so that untrusted web content is treated as data rather
+than instructions, mitigating prompt injection risks.
 """
 
 from typing import Any
 
 from artemis.models import SearchResult
-from artemis.llm import chat_completion
+from artemis.llm import build_tool_messages, chat_completion, sanitize_content
 
 
 async def summarize_results(
@@ -25,6 +26,9 @@ async def summarize_results(
     Takes a search query and list of results, formats them into a prompt,
     and sends to the LLM for summarization. The LLM is instructed to produce
     a concise, informative summary that addresses the query.
+
+    Search results are placed in a tool-response message so the model treats
+    them as retrieved data rather than user instructions.
 
     Args:
         query: The original search query
@@ -44,26 +48,33 @@ async def summarize_results(
     if not results:
         return {"summary": None, "usage": None}
 
-    context_parts = [f"Search query: {query}\n\nSearch results:\n"]
+    context_parts = []
     for i, r in enumerate(results, 1):
-        context_parts.append(f"{i}. **{r.title}**\n   URL: {r.url}\n   {r.snippet}\n")
+        title = sanitize_content(r.title, max_length=200)
+        snippet = sanitize_content(r.snippet, max_length=500)
+        context_parts.append(f"{i}. Title: {title}\n   URL: {r.url}\n   {snippet}")
 
-    context = "\n".join(context_parts)
+    tool_content = "\n\n".join(context_parts)
 
-    prompt = f"""You are a research assistant. Based on the search results below, provide a concise, informative summary that answers the user's query. 
+    system = (
+        "You are a research assistant. Based on the search results returned by the "
+        "web_search tool, provide a concise, informative summary that answers the "
+        "user's query.\n\n"
+        "Please provide a well-structured summary that:\n"
+        "1. Directly addresses the search query\n"
+        "2. Summarizes the key information from the results\n"
+        "3. Cites sources where relevant\n"
+        "4. Is informative and comprehensive but concise"
+    )
 
-{context}
-
-Please provide a well-structured summary that:
-1. Directly addresses the search query
-2. Summarizes the key information from the results
-3. Cites sources where relevant
-4. Is informative and comprehensive but concise
-
-Summary:"""
+    messages = build_tool_messages(
+        system=system,
+        user=query,
+        tool_content=tool_content,
+    )
 
     completion = await chat_completion(
-        prompt=prompt, model=model, max_tokens=max_tokens
+        messages=messages, model=model, max_tokens=max_tokens
     )
 
     return {
