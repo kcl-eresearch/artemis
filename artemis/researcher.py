@@ -240,11 +240,14 @@ async def generate_refined_queries(
     # Summarize current findings (untrusted web content)
     findings = format_results_for_synthesis(current_results[:10])
     
-    system = "You are a research query refinement specialist. Based on initial findings returned by the web_search tool, generate better follow-up queries."
+    system = "You are a research query refinement specialist. Based on initial findings, generate better follow-up queries."
     user = f"""Topic: {topic}
 Section: {section}
 
 Already Explored Queries: {', '.join(existing_queries)}
+
+Current findings:
+{findings}
 
 Generate {num_queries} NEW queries that explore aspects NOT yet covered by existing queries.
 Focus on gaps, unanswered questions, or deeper exploration of promising leads.
@@ -252,11 +255,10 @@ Respond with ONLY a JSON array of strings.
 
 Example: ["deeper aspect query", "contradiction check query"]"""
 
-    messages = build_tool_messages(
-        system=system,
-        user=user,
-        tool_content=findings,
-    )
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
 
     completion = await chat_completion(
         messages=messages,
@@ -745,14 +747,16 @@ Topic: {topic}
 Section: {section}
 Description: {description}
 
+Search results:
+{results_text}
+
 Return ONLY a JSON array of the result indices (0-based) for the most relevant results.
 Example: [0, 2, 5]"""
 
-    messages = build_tool_messages(
-        system=system,
-        user=user,
-        tool_content=results_text,
-    )
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
 
     try:
         completion = await chat_completion(
@@ -782,6 +786,8 @@ Example: [0, 2, 5]"""
         return (selected[:max_results] if selected else results[:max_results]), usage
     except (UpstreamServiceError, json.JSONDecodeError, ValueError, KeyError) as exc:
         logger.warning("LLM result selection failed, using first N: %s", exc)
+        logger.debug(messages)
+        logger.debug(completion["content"] if 'completion' in locals() else "No completion")
         return results[:max_results], TokenUsage()
 
 
