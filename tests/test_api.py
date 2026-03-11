@@ -35,7 +35,7 @@ class APITestCase(unittest.TestCase):
             return_value=Settings(
                 searxng_api_base="http://localhost:8888",
                 searxng_timeout_seconds=30.0,
-                litellm_base_url="https://api.openai.com/v1",
+                litellm_base_url="http://localhost:11434/api",
                 litellm_api_key=None,
                 llm_timeout_seconds=60.0,
                 summary_model="arc:apex",
@@ -93,7 +93,7 @@ class APITestCase(unittest.TestCase):
         settings = Settings(
             searxng_api_base="http://localhost:8888",
             searxng_timeout_seconds=30.0,
-            litellm_base_url="https://api.openai.com/v1",
+            litellm_base_url="http://localhost:11434/api",
             litellm_api_key=None,
             llm_timeout_seconds=60.0,
             summary_model="arc:apex",
@@ -158,7 +158,7 @@ class APITestCase(unittest.TestCase):
             return_value=Settings(
                 searxng_api_base="http://localhost:8888",
                 searxng_timeout_seconds=30.0,
-                litellm_base_url="https://api.openai.com/v1",
+                litellm_base_url="http://localhost:11434/api",
                 litellm_api_key=None,
                 llm_timeout_seconds=60.0,
                 summary_model="arc:apex",

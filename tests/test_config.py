@@ -16,7 +16,7 @@ class ConfigTestCase(unittest.TestCase):
             os.environ,
             {
                 "SEARXNG_API_BASE": "http://localhost:8888",
-                "LITELLM_BASE_URL": "https://api.openai.com/v1",
+                "LITELLM_BASE_URL": "http://localhost:11434/api",
                 "ALLOWED_ORIGINS": "not-a-url",
             },
             clear=True,
@@ -30,7 +30,7 @@ class ConfigTestCase(unittest.TestCase):
             os.environ,
             {
                 "SEARXNG_API_BASE": "http://localhost:8888",
-                "LITELLM_BASE_URL": "https://api.openai.com/v1",
+                "LITELLM_BASE_URL": "http://localhost:11434/api",
                 "ALLOWED_ORIGINS": "https://app.example.com, https://api.example.com/",
                 "ARTEMIS_API_KEY": "secret-token",
                 "ENABLE_SUMMARY": "false",

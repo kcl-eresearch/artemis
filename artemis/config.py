@@ -313,7 +313,7 @@ def get_settings() -> Settings:
         ),
         litellm_base_url=_validate_url(
             "LITELLM_BASE_URL",
-            os.getenv("LITELLM_BASE_URL", "https://api.openai.com/v1"),
+            os.getenv("LITELLM_BASE_URL", "http://localhost:11434/api"),
         ),
         litellm_api_key=_parse_optional_str("LITELLM_API_KEY")
         or _parse_optional_str("OPENAI_API_KEY"),

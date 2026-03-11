@@ -182,7 +182,7 @@ class GetSettingsDefaultsTestCase(unittest.TestCase):
         """Settings load with sensible defaults when minimal env is set."""
         with patch.dict(os.environ, {
             "SEARXNG_API_BASE": "http://localhost:8888",
-            "LITELLM_BASE_URL": "https://api.openai.com/v1",
+            "LITELLM_BASE_URL": "http://localhost:11434/api",
         }, clear=True):
             refresh_settings()
             s = get_settings()
@@ -203,7 +203,7 @@ class GetSettingsDefaultsTestCase(unittest.TestCase):
     def test_shallow_research_settings_can_be_overridden(self) -> None:
         with patch.dict(os.environ, {
             "SEARXNG_API_BASE": "http://localhost:8888",
-            "LITELLM_BASE_URL": "https://api.openai.com/v1",
+            "LITELLM_BASE_URL": "http://localhost:11434/api",
             "SHALLOW_RESEARCH_STAGES": "3",
             "SHALLOW_RESEARCH_PASSES": "2",
             "SHALLOW_RESEARCH_SUBQUERIES": "4",
@@ -247,7 +247,7 @@ class GetSettingsDefaultsTestCase(unittest.TestCase):
                     os.environ,
                     {
                         "SEARXNG_API_BASE": "http://localhost:8888",
-                        "LITELLM_BASE_URL": "https://api.openai.com/v1",
+                        "LITELLM_BASE_URL": "http://localhost:11434/api",
                         name: value,
                     },
                     clear=True,
