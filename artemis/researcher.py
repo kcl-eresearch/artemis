@@ -241,23 +241,20 @@ async def generate_refined_queries(
     findings = format_results_for_synthesis(current_results[:10])
     
     system = "You are a research query refinement specialist. Based on initial findings, generate better follow-up queries."
-    user = f"""Topic: {topic}
+
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": f"Here are the current search findings:\n\n{findings}"},
+        {"role": "user", "content": f"""Topic: {topic}
 Section: {section}
 
 Already Explored Queries: {', '.join(existing_queries)}
-
-Current findings:
-{findings}
 
 Generate {num_queries} NEW queries that explore aspects NOT yet covered by existing queries.
 Focus on gaps, unanswered questions, or deeper exploration of promising leads.
 Respond with ONLY a JSON array of strings.
 
-Example: ["deeper aspect query", "contradiction check query"]"""
-
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
+Example: ["deeper aspect query", "contradiction check query"]"""},
     ]
 
     completion = await chat_completion(
@@ -741,21 +738,17 @@ async def select_relevant_results(
     )
 
     system = "You are a research result selection specialist. Select the most relevant search results for content extraction based on the topic and section described by the user."
-    user = f"""Select the {max_results} most relevant search results for content extraction.
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": f"Here are the search results:\n\n{results_text}"},
+        {"role": "user", "content": f"""Select the {max_results} most relevant search results for content extraction.
 
 Topic: {topic}
 Section: {section}
 Description: {description}
 
-Search results:
-{results_text}
-
 Return ONLY a JSON array of the result indices (0-based) for the most relevant results.
-Example: [0, 2, 5]"""
-
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
+Example: [0, 2, 5]"""},
     ]
 
     try:
