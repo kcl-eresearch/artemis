@@ -322,6 +322,9 @@ async def chat_completion(
             }
             for name in sorted(tool_names)
         ]
+        # Tool defs are only declared so the API accepts the tool-call
+        # history — we never want the model to call tools in its response.
+        body["tool_choice"] = "none"
     if response_format is not None:
         body["response_format"] = response_format
 
@@ -362,6 +365,12 @@ async def chat_completion(
         )
 
     content = message.get("content")
+    # Some APIs return content as a list of blocks, e.g. [{"type":"text","text":"..."}]
+    if isinstance(content, list):
+        content = "".join(
+            block.get("text", "") for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
     if not isinstance(content, str) or not content.strip():
         raise UpstreamServiceError("The LLM backend returned empty content.")
 
