@@ -9,7 +9,7 @@ pip install -r requirements.txt
 # Run the server
 python -m artemis.main
 
-# Run all tests (63 unit tests, unittest-based)
+# Run all tests (247 unit tests, unittest-based)
 python3 -m unittest discover -s tests -p 'test_*.py'
 
 # Run a single test file
@@ -41,15 +41,17 @@ Artemis is a FastAPI service that wraps SearXNG (a meta-search engine) behind a 
 
 | Module | Responsibility |
 |---|---|
-| `main.py` | FastAPI app, endpoints, auth, circuit breaker, streaming |
+| `main.py` | FastAPI app, endpoints, auth, circuit breaker, streaming, request ID middleware |
 | `config.py` | Frozen `Settings` dataclass from env vars, cached via `get_settings()` |
 | `models.py` | Pydantic request/response models with LiteLLM billing fields |
-| `searcher.py` | SearXNG HTTP client with domain filtering |
+| `searcher.py` | SearXNG HTTP client with domain filtering and caching |
 | `summarizer.py` | Single-query LLM summarization |
-| `researcher.py` | Multi-stage deep research orchestration (~650 lines, most complex module) |
-| `extractor.py` | Playwright + trafilatura content extraction with domain blocking |
-| `llm.py` | LiteLLM-compatible chat completion client |
+| `researcher.py` | Multi-stage deep research orchestration (most complex module) |
+| `extractor.py` | Playwright + trafilatura content extraction with domain blocking and context recycling |
+| `llm.py` | LiteLLM-compatible chat completion and embedding client |
+| `cache.py` | Generic async TTL cache with request coalescing |
 | `errors.py` | `ArtemisError` → `UpstreamServiceError` hierarchy |
+| `cli.py` | One-shot CLI for deep research without the HTTP server (JSON/MD/DOCX output) |
 
 ## Key Conventions
 
@@ -116,9 +118,13 @@ All LLM operations return `TokenUsage`. Usage is accumulated across operations v
 - Outline generation falls back to a default outline on failure
 - Blocked domains (paywalled sites) are skipped without error
 
-### Streaming
+### Streaming and request cancellation
 
 `/v1/responses` supports `streaming: true`. Implementation uses `asyncio.Queue` — `deep_research()` runs as an `asyncio.create_task()` and pushes progress via a callback; the streaming generator reads from the queue. A `[USAGE]` JSON line is emitted at the end for LiteLLM billing.
+
+If the client disconnects mid-request, in-flight research tasks are cancelled automatically:
+- Streaming: `try/finally` in the generator cancels the task on teardown
+- Non-streaming: polls `request.is_disconnected()` and cancels with HTTP 499
 
 ### Testing patterns
 
@@ -130,3 +136,17 @@ All LLM operations return `TokenUsage`. Usage is accumulated across operations v
 ### Playwright browser management
 
 The Playwright browser context is shared globally and protected by `asyncio.Lock` with double-check locking to prevent concurrent launches. `extractor.py` maintains a blocklist of paywalled domains as a `frozenset`.
+
+The context is recycled after a configurable number of pages (`PLAYWRIGHT_CONTEXT_RECYCLE_PAGES`, default 50) to prevent memory leaks — the browser process is kept alive, only the context is recreated. Heavy resource types (images, fonts, stylesheets, media) are blocked via `page.route()`, and HTML size is capped (`PLAYWRIGHT_MAX_HTML_BYTES`, default 5MB).
+
+### Observability
+
+Structured logging with request ID correlation is built in:
+- Request ID middleware reads `x-request-id` from upstream (nginx/LiteLLM) or generates a UUID
+- Request ID is stored in a `contextvars.ContextVar` and injected into every log record
+- `LOG_FORMAT=json` emits single-line JSON logs for production aggregation
+- `/health` probes SearXNG and LLM connectivity, returning per-check status and overall `healthy`/`degraded`
+
+### Caching
+
+Search results and extracted page content are cached in-memory via `AsyncTTLCache` (in `cache.py`). The cache supports request coalescing — concurrent requests for the same key share a single fetch. When `EMBEDDING_MODEL` is configured, the searcher also performs semantic query deduplication via cosine similarity on embeddings.

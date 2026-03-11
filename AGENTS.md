@@ -4,12 +4,13 @@ This document provides context for AI agents working on the Artemis project.
 
 ## Project Overview
 
-Artemis is a FastAPI wrapper around SearXNG with a Perplexity-compatible API. Provides search and deep research capabilities using your own SearXNG instance.
+Artemis is a FastAPI wrapper around SearXNG with a Perplexity-compatible API. Provides search and deep research capabilities using your own SearXNG instance. It sits behind LiteLLM as a custom LLM provider.
 
 **Tech Stack:**
 - FastAPI (web framework)
 - httpx (async HTTP client)
 - Pydantic (validation)
+- Playwright + trafilatura (content extraction)
 - python-dotenv (config)
 
 ## Project Structure
@@ -17,91 +18,80 @@ Artemis is a FastAPI wrapper around SearXNG with a Perplexity-compatible API. Pr
 ```
 artemis/
 ├── __init__.py       # Package initialization
-├── main.py           # FastAPI app and endpoints (Perplexity-compatible API)
-├── config.py         # Configuration
-├── models.py         # Pydantic models
-├── searcher.py       # search_searxng() - SearXNG API client
-├── summarizer.py     # summarize_results() - LLM summarization
-├── researcher.py     # deep_research() - Multi-stage research
-├── extractor.py      # fetch_and_extract() - Page content extraction via trafilatura
-├── llm.py            # chat_completion() - LiteLLM-compatible client
-└── errors.py         # Custom exception hierarchy
+├── main.py           # FastAPI app, endpoints, auth, middleware, streaming
+├── config.py         # Frozen Settings dataclass from env vars
+├── models.py         # Pydantic request/response models
+├── searcher.py       # SearXNG HTTP client with domain filtering and caching
+├── summarizer.py     # Single-query LLM summarization
+├── researcher.py     # Multi-stage deep research orchestration (most complex module)
+├── extractor.py      # Playwright + trafilatura content extraction
+├── llm.py            # LiteLLM-compatible chat completion and embedding client
+├── cache.py          # Generic async TTL cache with request coalescing
+└── errors.py         # ArtemisError → UpstreamServiceError hierarchy
+
+cli.py                # One-shot CLI for deep research (JSON/MD/DOCX output)
 
 tests/
 ├── __init__.py
-└── test.py           # Test script
-
-searxng.yml           # SearXNG configuration
-docker-compose.yml    # Docker Compose setup
-Dockerfile            # Container definition
-requirements.txt      # Python dependencies
-.env.example          # Environment template
-README.md             # Documentation
+├── test.py                    # Manual integration test (requires live services)
+├── test_api.py                # Core API endpoint tests
+├── test_api_extended.py       # Health, auth, streaming, helper tests
+├── test_cache.py              # TTL cache, coalescing, semantic dedup tests
+├── test_circuit.py            # Circuit breaker tests
+├── test_config.py             # Config parsing tests
+├── test_config_extended.py    # Config edge case tests
+├── test_extractor.py          # Content extraction tests
+├── test_llm.py                # LLM client tests
+├── test_llm_extended.py       # LLM edge case tests
+├── test_models.py             # Pydantic model tests
+├── test_researcher.py         # Deep research tests
+├── test_researcher_extended.py # Research edge case tests
+├── test_searcher.py           # SearXNG client tests
+├── test_searcher_extended.py  # Searcher edge case tests
+└── test_summarizer.py         # Summarizer tests
 ```
-
-## Key Files
-
-### artemis/main.py
-- **FastAPI app** (`app`): Main application instance
-- **Endpoints** (Perplexity-compatible):
-  - `GET /` - Root endpoint
-  - `GET /health` - Health check
-  - `POST /search` - Search endpoint
-  - `POST /v1/responses` - Deep research endpoint
-
-### artemis/searcher.py
-- `search_searxng()` - Calls SearXNG API, parses results
-
-### artemis/summarizer.py
-- `summarize_results()` - Uses LLM to summarize results
-
-### artemis/researcher.py
-- `deep_research()` - Multi-stage adaptive research
-
-### artemis/config.py
-- `SEARXNG_API_BASE` - SearXNG instance URL
-- `SUMMARY_MODEL` - Model for summarization
-- `ENABLE_SUMMARY` - Toggle summarization on/off
 
 ## Development Commands
 
 ```bash
-# Run the server
-python -m artemis.main
-
-# Or with uvicorn
-uvicorn artemis.main:app --host 0.0.0.0 --port 8000
-
 # Install dependencies
 pip install -r requirements.txt
 
-# Run with Docker
+# Run the server
+python -m artemis.main
+
+# Run all tests (247 unit tests, unittest-based)
+python3 -m unittest discover -s tests -p 'test_*.py'
+
+# Run a single test file
+python3 -m unittest tests.test_searcher -v
+
+# Run a single test case
+python3 -m unittest tests.test_searcher.TestDomainFiltering.test_normalize_domain -v
+
+# Integration test (requires live SearXNG + running app)
+python3 -m tests.test
+
+# Docker
 docker-compose up -d
 ```
 
-## Testing
+No linter or formatter is configured.
 
-```bash
-# Run test script
-python -m tests.test
+## Endpoints
 
-# Test search endpoint
-curl -X POST http://localhost:8000/search \
-  -H "Content-Type: application/json" \
-  -d '{"query": "test", "max_results": 5}'
+- `GET /` - Root endpoint
+- `GET /health` - Health check with dependency probes (SearXNG + LLM)
+- `POST /search` - Search with optional LLM summarization
+- `POST /v1/responses` - Perplexity-compatible: fast-search, shallow-research, or deep-research presets
 
-# Test deep research
-curl -X POST http://localhost:8000/v1/responses \
-  -H "Content-Type: application/json" \
-  -d '{"input": "research topic", "preset": "deep-research"}'
+## Key Architecture Patterns
 
-# Health check
-curl http://localhost:8000/health
-```
-
-## Code Style
-
-- Async/await for I/O operations (httpx)
-- Pydantic models for validation
-- Type hints throughout
-- Use `httpx.AsyncClient` for async HTTP calls
+- **Config**: Always use `get_settings()` from `config.py` — never read env vars directly
+- **HTTP clients**: Module-level lazy singletons, all closed in `main.py`'s lifespan handler
+- **Error handling**: `UpstreamServiceError` for all external failures, caught by global handler
+- **Caching**: `AsyncTTLCache` with request coalescing; optional semantic dedup via embeddings
+- **Streaming**: `asyncio.Queue` with progress callback; tasks cancelled on client disconnect
+- **Playwright**: Context recycled every N pages; heavy resources blocked; HTML size capped
+- **Observability**: Request ID middleware (`x-request-id`), `contextvars` propagation, JSON log format option
+- **Content isolation**: Untrusted web content delivered to LLM via tool-call messages (not user messages) to mitigate prompt injection

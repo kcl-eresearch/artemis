@@ -38,6 +38,15 @@ Optional variables:
 - `SEARXNG_TIMEOUT_SECONDS` - Upstream search timeout in seconds
 - `LLM_TIMEOUT_SECONDS` - Upstream LLM timeout in seconds
 - `LOG_LEVEL` - Python log level (default: `INFO`)
+- `LOG_FORMAT` - Log output format: `text` (default) or `json`
+- `CACHE_ENABLED` - Enable in-memory caching (default: `true`)
+- `SEARCH_CACHE_TTL_SECONDS` - TTL for cached search results (default: 3600)
+- `CONTENT_CACHE_TTL_SECONDS` - TTL for cached extracted page content (default: 86400)
+- `CACHE_MAX_ENTRIES` - Maximum cache entries before oldest are evicted (default: 1000)
+- `EMBEDDING_MODEL` - Model for query embeddings; enables semantic dedup when set
+- `SEMANTIC_SIMILARITY_THRESHOLD` - Cosine similarity threshold for semantic cache hits (default: 0.92)
+- `PLAYWRIGHT_CONTEXT_RECYCLE_PAGES` - Recycle browser context after N pages (default: 50)
+- `PLAYWRIGHT_MAX_HTML_BYTES` - Max HTML bytes to extract per page (default: 5MB)
 
 Production recommendation:
 - Set `ARTEMIS_API_KEY`
@@ -180,6 +189,7 @@ Deep research config via environment:
 - `DEEP_RESEARCH_STAGES` - Number of outline sections (default: 2)
 - `DEEP_RESEARCH_PASSES` - Research passes, refines queries each pass (default: 1)
 - `DEEP_RESEARCH_SUBQUERIES` - Queries per section per pass (default: 5)
+- `DEEP_RESEARCH_RESULTS_PER_QUERY` - Search results per subquery (default: 10)
 - `DEEP_RESEARCH_MAX_TOKENS` - Max tokens for final essay (default: 8000)
 - `DEEP_RESEARCH_CONTENT_EXTRACTION` - Fetch full page content via Playwright + trafilatura (default: `true`)
 - `DEEP_RESEARCH_PAGES_PER_SECTION` - Pages to fetch per section (default: 3)
@@ -228,13 +238,34 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 python3 -m tests.test
 ```
 
+## CLI
+
+Run deep research directly from the command line without the HTTP server:
+
+```bash
+# JSON output (default)
+python cli.py "quantum computing advances"
+
+# Markdown output
+python cli.py "climate change" --format md
+
+# DOCX report, shallow preset
+python cli.py "rust vs go" --format docx --preset shallow
+
+# Write to stdout
+python cli.py "LLM architectures" --format md --output -
+```
+
 ## Operational Notes
 
-- `/health` reports service health plus whether auth and summarization are enabled
+- `/health` probes SearXNG and LLM connectivity, returning per-check status and overall `healthy`/`degraded`
 - Summary failures degrade gracefully via a circuit breaker pattern — after 3 consecutive LLM failures, summarization is temporarily disabled for 5 minutes
 - Deep research supports per-request `max_steps` (1-10) and reports aggregated token usage
+- If a client disconnects mid-request, in-flight research tasks are cancelled to avoid wasting LLM/Playwright resources
+- Search results and extracted page content are cached in-memory with request coalescing; optional semantic query deduplication via embeddings
 - Content extraction uses LLM-based relevance selection to pick the best results per section before running expensive Playwright page fetches
-- Playwright browser initialization is concurrency-safe (uses an asyncio lock to prevent duplicate launches)
+- Playwright browser context is recycled after a configurable number of pages; heavy resource types (images, fonts, stylesheets) are blocked to save memory
+- Structured logging with request ID correlation (`x-request-id` header); use `LOG_FORMAT=json` for production log aggregation
 - The container runs as a non-root user and includes a Docker healthcheck
 
 ## License
