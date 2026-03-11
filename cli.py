@@ -88,6 +88,32 @@ def _write_markdown(path: str, query: str, result, *, stdout: bool = False) -> N
             f.write(content)
 
 
+def _add_hyperlink(paragraph, url: str, text: str):
+    """Add a clickable hyperlink to a python-docx paragraph."""
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    part = paragraph.part
+    r_id = part.relate_to(url, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", is_external=True)
+
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), r_id)
+
+    r = OxmlElement("w:r")
+    rPr = OxmlElement("w:rPr")
+    rStyle = OxmlElement("w:rStyle")
+    rStyle.set(qn("w:val"), "Hyperlink")
+    rPr.append(rStyle)
+    r.append(rPr)
+
+    t = OxmlElement("w:t")
+    t.text = text
+    r.append(t)
+    hyperlink.append(r)
+    paragraph._p.append(hyperlink)
+    return hyperlink
+
+
 def _write_docx(path: str, query: str, result, **_kwargs) -> None:
     """Convert the markdown essay into a formatted DOCX document."""
     from docx import Document
@@ -129,7 +155,8 @@ def _write_docx(path: str, query: str, result, **_kwargs) -> None:
         doc.add_heading("Sources", level=1)
         for i, r in enumerate(result.results, 1):
             title = r.title or r.url
-            doc.add_paragraph(f"{i}. {title}\n   {r.url}", style="List Number")
+            para = doc.add_paragraph(f"{i}. ", style="List Number")
+            _add_hyperlink(para, r.url, title)
 
     doc.save(path)
 
