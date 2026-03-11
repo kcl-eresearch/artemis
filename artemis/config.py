@@ -358,11 +358,11 @@ def get_settings() -> Settings:
         litellm_api_key=_parse_optional_str("LITELLM_API_KEY")
         or _parse_optional_str("OPENAI_API_KEY"),
         llm_timeout_seconds=_parse_float(
-            "LLM_TIMEOUT_SECONDS", 60.0, minimum=1.0, maximum=600.0
+            "LLM_TIMEOUT_SECONDS", 120.0, minimum=1.0, maximum=600.0
         ),
         summary_model=os.getenv("SUMMARY_MODEL", "arc:apex").strip() or "arc:apex",
         summary_max_tokens=_parse_int(
-            "SUMMARY_MAX_TOKENS", 1024, minimum=128, maximum=16384
+            "SUMMARY_MAX_TOKENS", 2000, minimum=512, maximum=16384
         ),
         enable_summary=_parse_bool("ENABLE_SUMMARY", True),
         deep_research_stages=_parse_int(
