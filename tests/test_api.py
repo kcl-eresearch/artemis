@@ -64,6 +64,8 @@ class APITestCase(unittest.TestCase):
                 search_cache_ttl_seconds=3600,
                 content_cache_ttl_seconds=86400,
                 cache_max_entries=1000,
+                embedding_model=None,
+                semantic_similarity_threshold=0.92,
             ),
         ):
             unauthorized = self.client.post("/search", json={"query": "fastapi"})
@@ -126,6 +128,8 @@ class APITestCase(unittest.TestCase):
             search_cache_ttl_seconds=3600,
             content_cache_ttl_seconds=86400,
             cache_max_entries=1000,
+            embedding_model=None,
+            semantic_similarity_threshold=0.92,
         )
 
         with patch("artemis.main.get_settings", return_value=settings):
@@ -195,6 +199,8 @@ class APITestCase(unittest.TestCase):
                 search_cache_ttl_seconds=3600,
                 content_cache_ttl_seconds=86400,
                 cache_max_entries=1000,
+                embedding_model=None,
+                semantic_similarity_threshold=0.92,
             ),
         ):
             response = self.client.post(

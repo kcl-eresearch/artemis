@@ -300,3 +300,314 @@ class ContentCacheIntegrationTestCase(unittest.IsolatedAsyncioTestCase):
             cache.clear()
         else:
             self.assertEqual(mock_extract.await_count, 2)
+
+
+# ---------------------------------------------------------------------------
+# Embedding / cosine similarity tests
+# ---------------------------------------------------------------------------
+
+class CosineSimilarityTestCase(unittest.TestCase):
+    """Test the pure-Python cosine similarity helper."""
+
+    def test_identical_vectors(self) -> None:
+        from artemis.llm import cosine_similarity
+        v = [1.0, 2.0, 3.0]
+        self.assertAlmostEqual(cosine_similarity(v, v), 1.0, places=6)
+
+    def test_orthogonal_vectors(self) -> None:
+        from artemis.llm import cosine_similarity
+        a = [1.0, 0.0, 0.0]
+        b = [0.0, 1.0, 0.0]
+        self.assertAlmostEqual(cosine_similarity(a, b), 0.0, places=6)
+
+    def test_opposite_vectors(self) -> None:
+        from artemis.llm import cosine_similarity
+        a = [1.0, 0.0]
+        b = [-1.0, 0.0]
+        self.assertAlmostEqual(cosine_similarity(a, b), -1.0, places=6)
+
+    def test_zero_vector_returns_zero(self) -> None:
+        from artemis.llm import cosine_similarity
+        a = [0.0, 0.0]
+        b = [1.0, 2.0]
+        self.assertEqual(cosine_similarity(a, b), 0.0)
+
+    def test_known_similarity(self) -> None:
+        from artemis.llm import cosine_similarity
+        a = [1.0, 1.0]
+        b = [1.0, 0.0]
+        # cos(45°) ≈ 0.7071
+        self.assertAlmostEqual(cosine_similarity(a, b), 0.7071, places=3)
+
+
+class EmbedEndpointTestCase(unittest.IsolatedAsyncioTestCase):
+    """Test the embed() function."""
+
+    @patch("artemis.llm._get_client")
+    async def test_embed_returns_vector(self, mock_get_client: AsyncMock) -> None:
+        from artemis.llm import embed
+        from unittest.mock import MagicMock
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {
+            "data": [{"embedding": [0.1, 0.2, 0.3]}]
+        }
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_response
+        mock_get_client.return_value = mock_client
+
+        result = await embed("test query", "text-embedding-3-small")
+        self.assertEqual(result, [0.1, 0.2, 0.3])
+
+        call_args = mock_client.post.call_args
+        self.assertIn("/embeddings", call_args[0][0])
+        body = call_args[1]["json"]
+        self.assertEqual(body["input"], "test query")
+        self.assertEqual(body["model"], "text-embedding-3-small")
+
+    @patch("artemis.llm._get_client")
+    async def test_embed_timeout_raises(self, mock_get_client: AsyncMock) -> None:
+        from artemis.llm import embed
+        from artemis.errors import UpstreamServiceError
+        import httpx
+
+        mock_client = AsyncMock()
+        mock_client.post.side_effect = httpx.TimeoutException("timed out")
+        mock_get_client.return_value = mock_client
+
+        with self.assertRaises(UpstreamServiceError):
+            await embed("test query", "text-embedding-3-small")
+
+    @patch("artemis.llm._get_client")
+    async def test_embed_bad_structure_raises(self, mock_get_client: AsyncMock) -> None:
+        from artemis.llm import embed
+        from artemis.errors import UpstreamServiceError
+        from unittest.mock import MagicMock
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status.return_value = None
+        mock_response.json.return_value = {"data": []}  # No embeddings
+        mock_client = AsyncMock()
+        mock_client.post.return_value = mock_response
+        mock_get_client.return_value = mock_client
+
+        with self.assertRaises(UpstreamServiceError):
+            await embed("test query", "text-embedding-3-small")
+
+
+class SemanticSearchCacheTestCase(unittest.IsolatedAsyncioTestCase):
+    """Test semantic query deduplication in the searcher."""
+
+    def setUp(self) -> None:
+        import artemis.searcher as s
+        self._searcher = s
+        # Reset embedding index
+        s._embedding_index.clear()
+
+    def tearDown(self) -> None:
+        self._searcher._embedding_index.clear()
+        cache = self._searcher._get_search_cache()
+        if cache is not None:
+            cache.clear()
+
+    @patch("artemis.searcher.get_settings")
+    @patch("artemis.llm.embed", new_callable=AsyncMock)
+    @patch("artemis.searcher._search_searxng_uncached", new_callable=AsyncMock)
+    async def test_semantic_hit_skips_search(
+        self, mock_search: AsyncMock, mock_embed: AsyncMock, mock_settings
+    ) -> None:
+        from artemis.searcher import search_searxng, _get_search_cache
+        from artemis.config import Settings
+
+        # Configure with embedding model enabled
+        settings = Settings(
+            searxng_api_base="http://localhost:8888",
+            searxng_timeout_seconds=30.0,
+            litellm_base_url="http://localhost:11434/api",
+            litellm_api_key=None,
+            llm_timeout_seconds=60.0,
+            summary_model="arc:apex",
+            summary_max_tokens=1024,
+            enable_summary=True,
+            deep_research_stages=2,
+            deep_research_passes=1,
+            deep_research_subqueries=5,
+            deep_research_results_per_query=10,
+            deep_research_max_tokens=4000,
+            deep_research_content_extraction=True,
+            deep_research_pages_per_section=3,
+            deep_research_content_max_chars=3000,
+            shallow_research_stages=1,
+            shallow_research_passes=1,
+            shallow_research_subqueries=3,
+            shallow_research_results_per_query=5,
+            shallow_research_max_tokens=2500,
+            shallow_research_content_extraction=False,
+            shallow_research_pages_per_section=2,
+            shallow_research_content_max_chars=1500,
+            allowed_origins=tuple(),
+            artemis_api_key=None,
+            log_level="INFO",
+            cache_enabled=True,
+            search_cache_ttl_seconds=3600,
+            content_cache_ttl_seconds=86400,
+            cache_max_entries=1000,
+            embedding_model="text-embedding-3-small",
+            semantic_similarity_threshold=0.90,
+        )
+        mock_settings.return_value = settings
+
+        expected_results = [
+            SearchResult(title="R1", url="https://r1.com", snippet="S1"),
+        ]
+        mock_search.return_value = expected_results
+
+        # Both queries return very similar embeddings (cosine sim > 0.90)
+        emb_a = [0.9, 0.1, 0.0]
+        emb_b = [0.89, 0.12, 0.01]  # Very similar to emb_a
+        mock_embed.side_effect = [emb_a, emb_b]
+
+        cache = _get_search_cache()
+        if cache is not None:
+            cache.clear()
+        self._searcher._embedding_index.clear()
+
+        # First search — cache miss, search executed
+        r1 = await search_searxng(query="quantum computing advances")
+        self.assertEqual(mock_search.await_count, 1)
+
+        # Second search — semantically similar, should hit
+        r2 = await search_searxng(query="recent quantum computing progress")
+        # Should still be 1 search (semantic hit)
+        self.assertEqual(mock_search.await_count, 1)
+        self.assertEqual(r1, r2)
+
+    @patch("artemis.searcher.get_settings")
+    @patch("artemis.llm.embed", new_callable=AsyncMock)
+    @patch("artemis.searcher._search_searxng_uncached", new_callable=AsyncMock)
+    async def test_dissimilar_queries_no_semantic_hit(
+        self, mock_search: AsyncMock, mock_embed: AsyncMock, mock_settings
+    ) -> None:
+        from artemis.searcher import search_searxng, _get_search_cache
+        from artemis.config import Settings
+
+        settings = Settings(
+            searxng_api_base="http://localhost:8888",
+            searxng_timeout_seconds=30.0,
+            litellm_base_url="http://localhost:11434/api",
+            litellm_api_key=None,
+            llm_timeout_seconds=60.0,
+            summary_model="arc:apex",
+            summary_max_tokens=1024,
+            enable_summary=True,
+            deep_research_stages=2,
+            deep_research_passes=1,
+            deep_research_subqueries=5,
+            deep_research_results_per_query=10,
+            deep_research_max_tokens=4000,
+            deep_research_content_extraction=True,
+            deep_research_pages_per_section=3,
+            deep_research_content_max_chars=3000,
+            shallow_research_stages=1,
+            shallow_research_passes=1,
+            shallow_research_subqueries=3,
+            shallow_research_results_per_query=5,
+            shallow_research_max_tokens=2500,
+            shallow_research_content_extraction=False,
+            shallow_research_pages_per_section=2,
+            shallow_research_content_max_chars=1500,
+            allowed_origins=tuple(),
+            artemis_api_key=None,
+            log_level="INFO",
+            cache_enabled=True,
+            search_cache_ttl_seconds=3600,
+            content_cache_ttl_seconds=86400,
+            cache_max_entries=1000,
+            embedding_model="text-embedding-3-small",
+            semantic_similarity_threshold=0.90,
+        )
+        mock_settings.return_value = settings
+
+        mock_search.return_value = [
+            SearchResult(title="R1", url="https://r1.com", snippet="S1"),
+        ]
+
+        # Very different embeddings (orthogonal)
+        emb_a = [1.0, 0.0, 0.0]
+        emb_b = [0.0, 1.0, 0.0]
+        mock_embed.side_effect = [emb_a, emb_b]
+
+        cache = _get_search_cache()
+        if cache is not None:
+            cache.clear()
+        self._searcher._embedding_index.clear()
+
+        await search_searxng(query="quantum computing")
+        await search_searxng(query="best pizza recipes")
+
+        # Different topics, both should have searched
+        self.assertEqual(mock_search.await_count, 2)
+
+    @patch("artemis.searcher.get_settings")
+    @patch("artemis.searcher._search_searxng_uncached", new_callable=AsyncMock)
+    async def test_no_embedding_model_skips_semantic(
+        self, mock_search: AsyncMock, mock_settings
+    ) -> None:
+        from artemis.searcher import search_searxng, _get_search_cache
+        from artemis.config import Settings
+
+        settings = Settings(
+            searxng_api_base="http://localhost:8888",
+            searxng_timeout_seconds=30.0,
+            litellm_base_url="http://localhost:11434/api",
+            litellm_api_key=None,
+            llm_timeout_seconds=60.0,
+            summary_model="arc:apex",
+            summary_max_tokens=1024,
+            enable_summary=True,
+            deep_research_stages=2,
+            deep_research_passes=1,
+            deep_research_subqueries=5,
+            deep_research_results_per_query=10,
+            deep_research_max_tokens=4000,
+            deep_research_content_extraction=True,
+            deep_research_pages_per_section=3,
+            deep_research_content_max_chars=3000,
+            shallow_research_stages=1,
+            shallow_research_passes=1,
+            shallow_research_subqueries=3,
+            shallow_research_results_per_query=5,
+            shallow_research_max_tokens=2500,
+            shallow_research_content_extraction=False,
+            shallow_research_pages_per_section=2,
+            shallow_research_content_max_chars=1500,
+            allowed_origins=tuple(),
+            artemis_api_key=None,
+            log_level="INFO",
+            cache_enabled=True,
+            search_cache_ttl_seconds=3600,
+            content_cache_ttl_seconds=86400,
+            cache_max_entries=1000,
+            embedding_model=None,  # Disabled
+            semantic_similarity_threshold=0.92,
+        )
+        mock_settings.return_value = settings
+
+        mock_search.return_value = [
+            SearchResult(title="R1", url="https://r1.com", snippet="S1"),
+        ]
+
+        cache = _get_search_cache()
+        if cache is not None:
+            cache.clear()
+
+        await search_searxng(query="query one")
+        await search_searxng(query="query two")
+
+        # No semantic dedup, both go through (different exact keys)
+        self.assertEqual(mock_search.await_count, 2)
+        # No embeddings indexed
+        self.assertEqual(len(self._searcher._embedding_index), 0)

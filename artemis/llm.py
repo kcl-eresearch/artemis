@@ -68,6 +68,66 @@ async def close_client() -> None:
         _client = None
 
 
+# ---------------------------------------------------------------------------
+# Embedding helpers
+# ---------------------------------------------------------------------------
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Compute cosine similarity between two vectors (pure Python, no numpy)."""
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = sum(x * x for x in a) ** 0.5
+    norm_b = sum(x * x for x in b) ** 0.5
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+async def embed(text: str, model: str) -> list[float]:
+    """Compute an embedding vector via the LiteLLM-compatible embeddings endpoint.
+
+    Args:
+        text: The text to embed
+        model: The embedding model identifier
+
+    Returns:
+        Embedding vector as a list of floats
+
+    Raises:
+        UpstreamServiceError: If the embedding endpoint is unreachable or errors
+    """
+    settings = get_settings()
+    client = _get_client()
+    body = {"model": model, "input": text}
+
+    try:
+        response = await client.post(
+            f"{settings.litellm_base_url}/embeddings", json=body
+        )
+        response.raise_for_status()
+    except httpx.TimeoutException as exc:
+        raise UpstreamServiceError("The embedding endpoint timed out.") from exc
+    except httpx.HTTPStatusError as exc:
+        raise UpstreamServiceError(
+            f"The embedding endpoint returned HTTP {exc.response.status_code}."
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise UpstreamServiceError("The embedding request failed.") from exc
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise UpstreamServiceError(
+            "The embedding endpoint returned invalid JSON."
+        ) from exc
+
+    try:
+        return data["data"][0]["embedding"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise UpstreamServiceError(
+            "The embedding response has an unexpected structure."
+        ) from exc
+
+
 def _normalize_usage(usage: Any) -> dict[str, int] | None:
     """Normalize token usage from various LLM provider formats.
 

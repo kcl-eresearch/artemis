@@ -56,6 +56,8 @@ def _default_settings(**overrides) -> Settings:
         search_cache_ttl_seconds=3600,
         content_cache_ttl_seconds=86400,
         cache_max_entries=1000,
+        embedding_model=None,
+        semantic_similarity_threshold=0.92,
     )
     defaults.update(overrides)
     return Settings(**defaults)

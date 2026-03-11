@@ -6,6 +6,7 @@ This module provides the core search integration with SearXNG. It handles:
 - Parsing and normalizing search results
 - Domain filtering functionality
 - Caching with request coalescing to avoid duplicate searches
+- Semantic query deduplication via embeddings (when EMBEDDING_MODEL is set)
 
 The main entry point is search_searxng(), which returns a list of SearchResult
 objects ready for use in API responses or further processing.
@@ -16,6 +17,7 @@ A module-level httpx.AsyncClient is used for connection pooling across requests.
 import hashlib
 import json
 import logging
+import time
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -33,6 +35,10 @@ _client: httpx.AsyncClient | None = None
 
 # Module-level search cache (created lazily based on config)
 _search_cache: AsyncTTLCache[list[SearchResult]] | None = None
+
+# Semantic index: maps cache_key -> (embedding, params_hash, created_at)
+# Only populated when EMBEDDING_MODEL is configured.
+_embedding_index: dict[str, tuple[list[float], str, float]] = {}
 
 
 def _get_client() -> httpx.AsyncClient:
@@ -54,7 +60,7 @@ def _get_client() -> httpx.AsyncClient:
 
 async def close_client() -> None:
     """Close the shared httpx client and clear cache (called during app shutdown)."""
-    global _client, _search_cache
+    global _client, _search_cache, _embedding_index
     if _client is not None and not _client.is_closed:
         await _client.aclose()
         _client = None
@@ -68,6 +74,9 @@ async def close_client() -> None:
         )
         _search_cache.clear()
         _search_cache = None
+    if _embedding_index:
+        logger.info("Clearing %d embedding index entries", len(_embedding_index))
+        _embedding_index.clear()
 
 
 def _get_search_cache() -> AsyncTTLCache[list[SearchResult]] | None:
@@ -105,6 +114,66 @@ def _make_search_cache_key(
         sort_keys=True,
     )
     return hashlib.sha256(key_data.encode()).hexdigest()
+
+
+def _make_params_hash(
+    categories: Optional[str],
+    engines: Optional[str],
+    language: Optional[str],
+    pageno: Optional[int],
+    time_range: Optional[str],
+    safesearch: Optional[int],
+    max_results: Optional[int],
+    domain_filter: Optional[list[str]],
+) -> str:
+    """Hash of non-query params — semantic matches must share identical params."""
+    df = tuple(sorted(domain_filter)) if domain_filter else ()
+    key_data = json.dumps(
+        [categories, engines, language, pageno, time_range,
+         safesearch, max_results, df],
+        sort_keys=True,
+    )
+    return hashlib.sha256(key_data.encode()).hexdigest()
+
+
+def _find_semantic_match(
+    query_embedding: list[float],
+    params_hash: str,
+    threshold: float,
+    cache: AsyncTTLCache[list[SearchResult]],
+) -> list[SearchResult] | None:
+    """Scan the embedding index for a semantically similar cached query.
+
+    Only considers entries whose non-query params match exactly (same
+    categories, engines, language, etc.) and whose cache entry is still
+    live (not expired).
+
+    Returns cached results if cosine similarity >= threshold, else None.
+    """
+    from artemis.llm import cosine_similarity
+
+    best_sim = 0.0
+    best_key: str | None = None
+
+    for cache_key, (emb, p_hash, _created) in _embedding_index.items():
+        if p_hash != params_hash:
+            continue
+        # Only consider entries still live in the TTL cache
+        if cache.get(cache_key) is None:
+            continue
+        sim = cosine_similarity(query_embedding, emb)
+        if sim > best_sim:
+            best_sim = sim
+            best_key = cache_key
+
+    if best_key is not None and best_sim >= threshold:
+        logger.info(
+            "Semantic cache hit: similarity=%.3f (threshold=%.2f)",
+            best_sim, threshold,
+        )
+        return cache.get(best_key)
+
+    return None
 
 
 def _normalize_domain(domain: str) -> str:
@@ -224,13 +293,51 @@ async def search_searxng(
     ) if cache is not None else ""
 
     if cache is not None:
+        # Exact cache hit handled by get_or_fetch; but first try semantic match
+        exact = cache.get(cache_key)
+        if exact is not None:
+            cache.stats.hits += 1
+            return exact
+
+        # Semantic deduplication: if an embedding model is configured,
+        # check whether a semantically similar query is already cached.
+        if settings.embedding_model:
+            try:
+                from artemis.llm import embed
+                query_emb = await embed(query, settings.embedding_model)
+                params_hash = _make_params_hash(
+                    categories, engines, language, pageno,
+                    time_range, safesearch, max_results, domain_filter,
+                )
+                semantic_hit = _find_semantic_match(
+                    query_emb, params_hash,
+                    settings.semantic_similarity_threshold, cache,
+                )
+                if semantic_hit is not None:
+                    return semantic_hit
+            except Exception:
+                logger.debug("Semantic lookup failed, falling back to exact match",
+                             exc_info=True)
+                query_emb = None
+                params_hash = ""
+        else:
+            query_emb = None
+            params_hash = ""
+
         async def _fetch() -> list[SearchResult]:
             return await _search_searxng_uncached(
                 query, categories, engines, language, pageno,
                 time_range, format, safesearch, image_proxy,
                 autocomplete, results_on_new_tab, max_results, domain_filter,
             )
-        return await cache.get_or_fetch(cache_key, _fetch)
+
+        results = await cache.get_or_fetch(cache_key, _fetch)
+
+        # Index the embedding for future semantic lookups
+        if query_emb is not None and params_hash:
+            _embedding_index[cache_key] = (query_emb, params_hash, time.monotonic())
+
+        return results
 
     return await _search_searxng_uncached(
         query, categories, engines, language, pageno,

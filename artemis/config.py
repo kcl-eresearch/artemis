@@ -261,6 +261,8 @@ class Settings:
         search_cache_ttl_seconds: TTL for cached search results
         content_cache_ttl_seconds: TTL for cached extracted page content
         cache_max_entries: Maximum entries per cache before oldest are evicted
+        embedding_model: Model for query embeddings (enables semantic dedup when set)
+        semantic_similarity_threshold: Cosine similarity threshold for semantic cache hits
     """
 
     searxng_api_base: str
@@ -294,6 +296,8 @@ class Settings:
     search_cache_ttl_seconds: int
     content_cache_ttl_seconds: int
     cache_max_entries: int
+    embedding_model: str | None
+    semantic_similarity_threshold: float
 
 
 @lru_cache(maxsize=1)
@@ -393,6 +397,10 @@ def get_settings() -> Settings:
         ),
         cache_max_entries=_parse_int(
             "CACHE_MAX_ENTRIES", 1000, minimum=10, maximum=100000
+        ),
+        embedding_model=_parse_optional_str("EMBEDDING_MODEL"),
+        semantic_similarity_threshold=_parse_float(
+            "SEMANTIC_SIMILARITY_THRESHOLD", 0.92, minimum=0.5, maximum=1.0
         ),
     )
 
