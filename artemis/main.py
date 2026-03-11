@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from artemis.config import (
+    Settings,
     get_settings,
 )
 from artemis.errors import UpstreamServiceError
@@ -98,6 +99,46 @@ class SummaryCircuitState:
 SUMMARY_CIRCUIT_FAILURE_THRESHOLD = 3  # Failures before opening circuit
 SUMMARY_CIRCUIT_BACKOFF_SECONDS = 300  # 5 minute cooldown
 summary_circuit = SummaryCircuitState()
+
+
+@dataclass(frozen=True)
+class ResearchPresetConfig:
+    stages: int
+    passes: int
+    subqueries: int
+    results_per_query: int
+    max_tokens: int
+    content_extraction: bool
+    pages_per_section: int
+    content_max_chars: int
+    model_name: str
+
+
+def _research_preset_config(settings: Settings, preset: str) -> ResearchPresetConfig:
+    if preset == "shallow-research":
+        return ResearchPresetConfig(
+            stages=settings.shallow_research_stages,
+            passes=settings.shallow_research_passes,
+            subqueries=settings.shallow_research_subqueries,
+            results_per_query=settings.shallow_research_results_per_query,
+            max_tokens=settings.shallow_research_max_tokens,
+            content_extraction=settings.shallow_research_content_extraction,
+            pages_per_section=settings.shallow_research_pages_per_section,
+            content_max_chars=settings.shallow_research_content_max_chars,
+            model_name="artemis-shallow-research",
+        )
+
+    return ResearchPresetConfig(
+        stages=settings.deep_research_stages,
+        passes=settings.deep_research_passes,
+        subqueries=settings.deep_research_subqueries,
+        results_per_query=settings.deep_research_results_per_query,
+        max_tokens=settings.deep_research_max_tokens,
+        content_extraction=settings.deep_research_content_extraction,
+        pages_per_section=settings.deep_research_pages_per_section,
+        content_max_chars=settings.deep_research_content_max_chars,
+        model_name="artemis-deep-research",
+    )
 
 
 app = FastAPI(
@@ -260,17 +301,24 @@ async def _stream_responses(request: ResponsesRequest) -> StreamingResponse:
 
         yield f"[Starting research on: {request.input}]\n\n"
 
-        if request.preset == "deep-research":
+        if request.preset in {"deep-research", "shallow-research"}:
             queue: asyncio.Queue[str] = asyncio.Queue()
+            preset_config = _research_preset_config(settings, request.preset)
 
             def progress_cb(stage: str, msg: str):
                 queue.put_nowait(f"[{stage.upper()}] {msg}")
 
             research_task = asyncio.create_task(deep_research(
                 request.input,
-                stages=request.max_steps or settings.deep_research_stages,
-                passes=settings.deep_research_passes,
+                stages=request.max_steps or preset_config.stages,
+                passes=preset_config.passes,
+                sub_queries_per_stage=preset_config.subqueries,
+                results_per_query=preset_config.results_per_query,
+                max_tokens=preset_config.max_tokens,
                 outline=request.outline,
+                content_extraction=preset_config.content_extraction,
+                pages_per_section=preset_config.pages_per_section,
+                content_max_chars=preset_config.content_max_chars,
                 progress_callback=progress_cb,
             ))
 
@@ -436,18 +484,25 @@ async def responses(request: ResponsesRequest) -> ResponsesAPIResponse | Streami
     if request.streaming:
         return await _stream_responses(request)
     
-    if request.preset == "deep-research":
+    if request.preset in {"deep-research", "shallow-research"}:
         settings = get_settings()
+        preset_config = _research_preset_config(settings, request.preset)
         research_run = await deep_research(
             request.input,
-            stages=request.max_steps or settings.deep_research_stages,
-            passes=settings.deep_research_passes,
+            stages=request.max_steps or preset_config.stages,
+            passes=preset_config.passes,
+            sub_queries_per_stage=preset_config.subqueries,
+            results_per_query=preset_config.results_per_query,
+            max_tokens=preset_config.max_tokens,
             outline=request.outline,
+            content_extraction=preset_config.content_extraction,
+            pages_per_section=preset_config.pages_per_section,
+            content_max_chars=preset_config.content_max_chars,
         )
         return ResponsesAPIResponse(
             id=str(uuid.uuid4()),
             created=_created_timestamp(),
-            model="artemis-deep-research",
+            model=preset_config.model_name,
             output=[
                 _message_output(research_run.essay),
                 SearchResultsBlock(results=_result_items(research_run.results)),

@@ -49,6 +49,14 @@ class APITestCase(unittest.TestCase):
                 deep_research_content_extraction=True,
                 deep_research_pages_per_section=3,
                 deep_research_content_max_chars=3000,
+                shallow_research_stages=1,
+                shallow_research_passes=1,
+                shallow_research_subqueries=3,
+                shallow_research_results_per_query=5,
+                shallow_research_max_tokens=4000,
+                shallow_research_content_extraction=False,
+                shallow_research_pages_per_section=2,
+                shallow_research_content_max_chars=2000,
                 allowed_origins=tuple(),
                 artemis_api_key="secret-token",
                 log_level="INFO",
@@ -82,17 +90,120 @@ class APITestCase(unittest.TestCase):
             stages_completed=5,
             usage=TokenUsage(input_tokens=10, output_tokens=20, total_tokens=30),
         )
-
-        response = self.client.post(
-            "/v1/responses",
-            json={"input": "example", "preset": "deep-research", "max_steps": 5},
+        settings = Settings(
+            searxng_api_base="http://localhost:8888",
+            searxng_timeout_seconds=30.0,
+            litellm_base_url="https://api.openai.com/v1",
+            litellm_api_key=None,
+            llm_timeout_seconds=60.0,
+            summary_model="arc:apex",
+            summary_max_tokens=1024,
+            enable_summary=True,
+            deep_research_stages=2,
+            deep_research_passes=1,
+            deep_research_subqueries=5,
+            deep_research_results_per_query=10,
+            deep_research_max_tokens=4000,
+            deep_research_content_extraction=True,
+            deep_research_pages_per_section=3,
+            deep_research_content_max_chars=3000,
+            shallow_research_stages=1,
+            shallow_research_passes=1,
+            shallow_research_subqueries=3,
+            shallow_research_results_per_query=5,
+            shallow_research_max_tokens=2500,
+            shallow_research_content_extraction=False,
+            shallow_research_pages_per_section=2,
+            shallow_research_content_max_chars=1500,
+            allowed_origins=tuple(),
+            artemis_api_key=None,
+            log_level="INFO",
         )
+
+        with patch("artemis.main.get_settings", return_value=settings):
+            response = self.client.post(
+                "/v1/responses",
+                json={"input": "example", "preset": "deep-research", "max_steps": 5},
+            )
 
         self.assertEqual(response.status_code, 200)
         mock_deep_research.assert_awaited_once_with(
-            "example", stages=5, passes=1, outline=None
+            "example",
+            stages=5,
+            passes=1,
+            sub_queries_per_stage=5,
+            results_per_query=10,
+            max_tokens=4000,
+            outline=None,
+            content_extraction=True,
+            pages_per_section=3,
+            content_max_chars=3000,
         )
         self.assertEqual(response.json()["usage"]["total_tokens"], 30)
+
+    @patch("artemis.main.deep_research", new_callable=AsyncMock)
+    def test_shallow_research_uses_shallow_settings(
+        self, mock_deep_research: AsyncMock
+    ) -> None:
+        mock_deep_research.return_value = DeepResearchRun(
+            essay="Concise report",
+            results=[],
+            sub_queries=["example"],
+            stages_completed=1,
+            usage=TokenUsage(input_tokens=5, output_tokens=10, total_tokens=15),
+        )
+
+        with patch(
+            "artemis.main.get_settings",
+            return_value=Settings(
+                searxng_api_base="http://localhost:8888",
+                searxng_timeout_seconds=30.0,
+                litellm_base_url="https://api.openai.com/v1",
+                litellm_api_key=None,
+                llm_timeout_seconds=60.0,
+                summary_model="arc:apex",
+                summary_max_tokens=1024,
+                enable_summary=True,
+                deep_research_stages=2,
+                deep_research_passes=1,
+                deep_research_subqueries=5,
+                deep_research_results_per_query=10,
+                deep_research_max_tokens=4000,
+                deep_research_content_extraction=True,
+                deep_research_pages_per_section=3,
+                deep_research_content_max_chars=3000,
+                shallow_research_stages=1,
+                shallow_research_passes=1,
+                shallow_research_subqueries=3,
+                shallow_research_results_per_query=5,
+                shallow_research_max_tokens=2500,
+                shallow_research_content_extraction=False,
+                shallow_research_pages_per_section=2,
+                shallow_research_content_max_chars=1500,
+                allowed_origins=tuple(),
+                artemis_api_key=None,
+                log_level="INFO",
+            ),
+        ):
+            response = self.client.post(
+                "/v1/responses",
+                json={"input": "example", "preset": "shallow-research"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        mock_deep_research.assert_awaited_once_with(
+            "example",
+            stages=1,
+            passes=1,
+            sub_queries_per_stage=3,
+            results_per_query=5,
+            max_tokens=2500,
+            outline=None,
+            content_extraction=False,
+            pages_per_section=2,
+            content_max_chars=1500,
+        )
+        self.assertEqual(response.json()["model"], "artemis-shallow-research")
 
     @patch("artemis.main.summarize_results", new_callable=AsyncMock)
     @patch("artemis.main.search_searxng", new_callable=AsyncMock)
