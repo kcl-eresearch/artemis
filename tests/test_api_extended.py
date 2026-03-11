@@ -41,6 +41,14 @@ def _default_settings(**overrides) -> Settings:
         deep_research_content_extraction=True,
         deep_research_pages_per_section=3,
         deep_research_content_max_chars=3000,
+        shallow_research_stages=1,
+        shallow_research_passes=1,
+        shallow_research_subqueries=3,
+        shallow_research_results_per_query=5,
+        shallow_research_max_tokens=2500,
+        shallow_research_content_extraction=False,
+        shallow_research_pages_per_section=2,
+        shallow_research_content_max_chars=1500,
         allowed_origins=tuple(),
         artemis_api_key=None,
         log_level="INFO",
@@ -279,6 +287,27 @@ class ResponsesEndpointTestCase(unittest.TestCase):
         self.assertIn("Research essay", body["output"][0]["content"][0]["text"])
         self.assertEqual(body["usage"]["total_tokens"], 300)
 
+    @patch("artemis.main.deep_research", new_callable=AsyncMock)
+    def test_shallow_research_response_structure(self, mock_dr: AsyncMock) -> None:
+        mock_dr.return_value = DeepResearchRun(
+            essay="Shallow research essay",
+            results=[SearchResult(title="R", url="https://r.com", snippet="S")],
+            sub_queries=["q1"],
+            stages_completed=1,
+            usage=TokenUsage(input_tokens=10, output_tokens=20, total_tokens=30),
+        )
+
+        with patch("artemis.main.get_settings", return_value=_default_settings()):
+            response = self.client.post(
+                "/v1/responses", json={"input": "topic", "preset": "shallow-research"}
+            )
+        body = response.json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(body["model"], "artemis-shallow-research")
+        self.assertIn("Shallow research essay", body["output"][0]["content"][0]["text"])
+        self.assertEqual(body["usage"]["total_tokens"], 30)
+
 
 class StreamingTestCase(unittest.TestCase):
     def setUp(self) -> None:
@@ -324,6 +353,32 @@ class StreamingTestCase(unittest.TestCase):
         body = response.text
         self.assertIn("[Starting research on: test topic]", body)
         self.assertIn("Streamed essay content", body)
+        self.assertIn("[USAGE]", body)
+
+    @patch("artemis.main.deep_research", new_callable=AsyncMock)
+    def test_shallow_research_streaming(self, mock_dr: AsyncMock) -> None:
+        mock_dr.return_value = DeepResearchRun(
+            essay="Shallow streamed essay",
+            results=[SearchResult(title="R", url="https://r.com", snippet="S")],
+            sub_queries=["q1"],
+            stages_completed=1,
+            usage=TokenUsage(input_tokens=5, output_tokens=15, total_tokens=20),
+        )
+
+        with patch("artemis.main.get_settings", return_value=_default_settings()):
+            response = self.client.post(
+                "/v1/responses",
+                json={
+                    "input": "test topic",
+                    "preset": "shallow-research",
+                    "streaming": True,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.text
+        self.assertIn("[Starting research on: test topic]", body)
+        self.assertIn("Shallow streamed essay", body)
         self.assertIn("[USAGE]", body)
 
     @patch("artemis.main.deep_research", new_callable=AsyncMock)

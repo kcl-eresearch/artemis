@@ -189,5 +189,31 @@ class GetSettingsDefaultsTestCase(unittest.TestCase):
             self.assertEqual(s.searxng_api_base, "http://localhost:8888")
             self.assertEqual(s.deep_research_stages, 2)
             self.assertEqual(s.deep_research_passes, 1)
+            self.assertEqual(s.shallow_research_stages, 1)
+            self.assertEqual(s.shallow_research_passes, 1)
             self.assertTrue(s.enable_summary)
             self.assertIsNone(s.artemis_api_key)
+
+    def test_shallow_research_settings_can_be_overridden(self) -> None:
+        with patch.dict(os.environ, {
+            "SEARXNG_API_BASE": "http://localhost:8888",
+            "LITELLM_BASE_URL": "https://api.openai.com/v1",
+            "SHALLOW_RESEARCH_STAGES": "3",
+            "SHALLOW_RESEARCH_PASSES": "2",
+            "SHALLOW_RESEARCH_SUBQUERIES": "4",
+            "SHALLOW_RESEARCH_RESULTS_PER_QUERY": "6",
+            "SHALLOW_RESEARCH_MAX_TOKENS": "5000",
+            "SHALLOW_RESEARCH_CONTENT_EXTRACTION": "true",
+            "SHALLOW_RESEARCH_PAGES_PER_SECTION": "4",
+            "SHALLOW_RESEARCH_CONTENT_MAX_CHARS": "2500",
+        }, clear=True):
+            refresh_settings()
+            s = get_settings()
+            self.assertEqual(s.shallow_research_stages, 3)
+            self.assertEqual(s.shallow_research_passes, 2)
+            self.assertEqual(s.shallow_research_subqueries, 4)
+            self.assertEqual(s.shallow_research_results_per_query, 6)
+            self.assertEqual(s.shallow_research_max_tokens, 5000)
+            self.assertTrue(s.shallow_research_content_extraction)
+            self.assertEqual(s.shallow_research_pages_per_section, 4)
+            self.assertEqual(s.shallow_research_content_max_chars, 2500)

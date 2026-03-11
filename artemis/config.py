@@ -246,6 +246,14 @@ class Settings:
         deep_research_content_extraction: Whether to fetch full page content for synthesis
         deep_research_pages_per_section: Pages to fetch per outline section
         deep_research_content_max_chars: Max characters of extracted content per page
+        shallow_research_stages: Number of outline sections in shallow research mode
+        shallow_research_passes: Number of research passes in shallow research mode
+        shallow_research_subqueries: Subqueries generated per stage in shallow research mode
+        shallow_research_results_per_query: Search results per subquery in shallow research mode
+        shallow_research_max_tokens: Max tokens for shallow research synthesis
+        shallow_research_content_extraction: Whether shallow research extracts page content
+        shallow_research_pages_per_section: Pages to fetch per outline section in shallow research mode
+        shallow_research_content_max_chars: Max characters of extracted content per page in shallow research mode
         allowed_origins: CORS-allowed origins (empty = browser clients blocked)
         artemis_api_key: Bearer token for API authentication (optional)
         log_level: Python logging level
@@ -267,6 +275,14 @@ class Settings:
     deep_research_content_extraction: bool
     deep_research_pages_per_section: int
     deep_research_content_max_chars: int
+    shallow_research_stages: int
+    shallow_research_passes: int
+    shallow_research_subqueries: int
+    shallow_research_results_per_query: int
+    shallow_research_max_tokens: int
+    shallow_research_content_extraction: bool
+    shallow_research_pages_per_section: int
+    shallow_research_content_max_chars: int
     allowed_origins: tuple[str, ...]
     artemis_api_key: str | None
     log_level: str
@@ -332,6 +348,30 @@ def get_settings() -> Settings:
         ),
         deep_research_content_max_chars=_parse_int(
             "DEEP_RESEARCH_CONTENT_MAX_CHARS", 3000, minimum=500, maximum=10000
+        ),
+        shallow_research_stages=_parse_int(
+            "SHALLOW_RESEARCH_STAGES", 1, minimum=1, maximum=10
+        ),
+        shallow_research_passes=_parse_int(
+            "SHALLOW_RESEARCH_PASSES", 1, minimum=1, maximum=5
+        ),
+        shallow_research_subqueries=_parse_int(
+            "SHALLOW_RESEARCH_SUBQUERIES", 3, minimum=1, maximum=10
+        ),
+        shallow_research_results_per_query=_parse_int(
+            "SHALLOW_RESEARCH_RESULTS_PER_QUERY", 5, minimum=1, maximum=25
+        ),
+        shallow_research_max_tokens=_parse_int(
+            "SHALLOW_RESEARCH_MAX_TOKENS", 4000, minimum=256, maximum=32768
+        ),
+        shallow_research_content_extraction=_parse_bool(
+            "SHALLOW_RESEARCH_CONTENT_EXTRACTION", False
+        ),
+        shallow_research_pages_per_section=_parse_int(
+            "SHALLOW_RESEARCH_PAGES_PER_SECTION", 2, minimum=1, maximum=10
+        ),
+        shallow_research_content_max_chars=_parse_int(
+            "SHALLOW_RESEARCH_CONTENT_MAX_CHARS", 2000, minimum=500, maximum=10000
         ),
         allowed_origins=_parse_allowed_origins(),
         artemis_api_key=_parse_optional_str("ARTEMIS_API_KEY"),

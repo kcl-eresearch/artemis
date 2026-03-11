@@ -115,8 +115,9 @@ class SearchResponse(BaseModel):
 class ResponsesRequest(BaseModel):
     """Request model for Perplexity-compatible /v1/responses endpoint.
 
-    Supports two modes:
+    Supports three modes:
     - "fast-search": Single search with optional summarization
+    - "shallow-research": Single-pass research with shallower preset defaults
     - "deep-research": Multi-stage research with essay synthesis
 
     Attributes:
@@ -127,7 +128,7 @@ class ResponsesRequest(BaseModel):
     """
 
     input: str = Field(min_length=1, max_length=4000)
-    preset: Literal["fast-search", "deep-research"] = "fast-search"
+    preset: Literal["fast-search", "shallow-research", "deep-research"] = "fast-search"
     outline: list[dict[str, str]] | None = None
     max_steps: int | None = Field(default=None, ge=1, le=10)
     streaming: bool = False

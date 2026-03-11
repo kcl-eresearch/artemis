@@ -92,6 +92,10 @@ class ResponsesRequestValidationTestCase(unittest.TestCase):
         with self.assertRaises(ValidationError):
             ResponsesRequest(input="test", preset="invalid")
 
+    def test_shallow_research_preset_accepted(self) -> None:
+        req = ResponsesRequest(input="test", preset="shallow-research")
+        self.assertEqual(req.preset, "shallow-research")
+
     def test_max_steps_bounds(self) -> None:
         with self.assertRaises(ValidationError):
             ResponsesRequest(input="test", max_steps=0)

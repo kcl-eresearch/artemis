@@ -126,6 +126,19 @@ curl -X POST http://localhost:8000/v1/responses \
   }'
 ```
 
+### Shallow Research (`POST /v1/responses`)
+
+```bash
+# Faster research pass with shallower env-configured defaults
+curl -X POST http://localhost:8000/v1/responses \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <your-api-key>" \
+  -d '{
+    "input": "Research topic: the future of AI in healthcare",
+    "preset": "shallow-research"
+  }'
+```
+
 ### Streaming (`POST /v1/responses` with `streaming: true`)
 
 ```bash
@@ -158,8 +171,8 @@ For non-streaming requests, the response includes the essay and all sources as J
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `input` | string | Yes | Research query |
-| `preset` | string | No | `fast-search` (default) or `deep-research` |
-| `max_steps` | integer | No | Override `DEEP_RESEARCH_STAGES` per-request (1-10, deep-research only) |
+| `preset` | string | No | `fast-search` (default), `shallow-research`, or `deep-research` |
+| `max_steps` | integer | No | Override the preset's configured research stages per-request (1-10, research presets only) |
 | `outline` | array | No | Custom outline sections. Each: `{"section": "Name", "description": "..."}`. Overrides `DEEP_RESEARCH_STAGES`. |
 | `streaming` | boolean | No | Stream progress events in real-time (default: `false`) |
 
@@ -171,6 +184,16 @@ Deep research config via environment:
 - `DEEP_RESEARCH_CONTENT_EXTRACTION` - Fetch full page content via Playwright + trafilatura (default: `true`)
 - `DEEP_RESEARCH_PAGES_PER_SECTION` - Pages to fetch per section (default: 3)
 - `DEEP_RESEARCH_CONTENT_MAX_CHARS` - Max extracted chars per page (default: 3000)
+
+Shallow research config via environment:
+- `SHALLOW_RESEARCH_STAGES` - Number of outline sections (default: 1)
+- `SHALLOW_RESEARCH_PASSES` - Research passes (default: 1)
+- `SHALLOW_RESEARCH_SUBQUERIES` - Queries per section per pass (default: 3)
+- `SHALLOW_RESEARCH_RESULTS_PER_QUERY` - Search results per query (default: 5)
+- `SHALLOW_RESEARCH_MAX_TOKENS` - Max tokens for final essay (default: 4000)
+- `SHALLOW_RESEARCH_CONTENT_EXTRACTION` - Fetch full page content via Playwright + trafilatura (default: `false`)
+- `SHALLOW_RESEARCH_PAGES_PER_SECTION` - Pages to fetch per section (default: 2)
+- `SHALLOW_RESEARCH_CONTENT_MAX_CHARS` - Max extracted chars per page (default: 2000)
 
 If `ARTEMIS_API_KEY` is set, both `POST /search` and `POST /v1/responses` require `Authorization: Bearer <key>`.
 

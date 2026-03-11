@@ -397,6 +397,9 @@ async def deep_research(
     max_tokens: int | None = None,
     passes: int | None = None,
     outline: list[dict[str, str]] | None = None,
+    content_extraction: bool | None = None,
+    pages_per_section: int | None = None,
+    content_max_chars: int | None = None,
     enable_filtering: bool = True,
     progress_callback: Callable[[str, str], None] | None = None,
 ) -> DeepResearchRun:
@@ -424,6 +427,13 @@ async def deep_research(
     results_per_query = results_per_query or settings.deep_research_results_per_query
     max_tokens = max_tokens or settings.deep_research_max_tokens
     passes = passes or 1
+    content_extraction = (
+        settings.deep_research_content_extraction
+        if content_extraction is None
+        else content_extraction
+    )
+    pages_per_section = pages_per_section or settings.deep_research_pages_per_section
+    content_max_chars = content_max_chars or settings.deep_research_content_max_chars
 
     total_usage = TokenUsage()
     all_results: list[SearchResult] = []
@@ -610,10 +620,10 @@ async def deep_research(
     section_result_counts = {s: len(r) for s, r in final_section_results.items()}
     logger.info(
         "Content extraction: enabled=%s, sections=%s",
-        settings.deep_research_content_extraction,
+        content_extraction,
         section_result_counts,
     )
-    if settings.deep_research_content_extraction:
+    if content_extraction:
         _progress("extraction", "Selecting most relevant results for content extraction")
 
         # Use LLM to pick the best results per section (parallel)
@@ -630,7 +640,7 @@ async def deep_research(
                         section=section,
                         description=item["description"],
                         results=section_res,
-                        max_results=settings.deep_research_pages_per_section,
+                        max_results=pages_per_section,
                     )
                 )
 
@@ -645,9 +655,7 @@ async def deep_research(
                         "LLM result selection failed for %r, using first N: %s",
                         section, outcome,
                     )
-                    extraction_targets[section] = final_section_results[section][
-                        :settings.deep_research_pages_per_section
-                    ]
+                    extraction_targets[section] = final_section_results[section][:pages_per_section]
                 else:
                     selected, usage = outcome
                     _merge_usage(total_usage, usage.model_dump())
@@ -663,7 +671,7 @@ async def deep_research(
                     enrich_results(
                         targets,
                         max_pages=len(targets),
-                        max_chars_per_page=settings.deep_research_content_max_chars,
+                        max_chars_per_page=content_max_chars,
                     )
                 )
 
