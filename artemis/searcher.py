@@ -146,7 +146,8 @@ def _find_semantic_match(
 
     Only considers entries whose non-query params match exactly (same
     categories, engines, language, etc.) and whose cache entry is still
-    live (not expired).
+    live (not expired).  Prunes stale index entries whose cache entry
+    has expired.
 
     Returns cached results if cosine similarity >= threshold, else None.
     """
@@ -154,17 +155,28 @@ def _find_semantic_match(
 
     best_sim = 0.0
     best_key: str | None = None
+    stale_keys: list[str] = []
 
     for cache_key, (emb, p_hash, _created) in _embedding_index.items():
         if p_hash != params_hash:
+            # Still check liveness to collect stale entries
+            if cache.get(cache_key) is None:
+                stale_keys.append(cache_key)
             continue
         # Only consider entries still live in the TTL cache
         if cache.get(cache_key) is None:
+            stale_keys.append(cache_key)
             continue
         sim = cosine_similarity(query_embedding, emb)
         if sim > best_sim:
             best_sim = sim
             best_key = cache_key
+
+    # Prune index entries whose cache entry has expired
+    for k in stale_keys:
+        del _embedding_index[k]
+    if stale_keys:
+        logger.debug("Pruned %d stale embedding index entries", len(stale_keys))
 
     if best_key is not None and best_sim >= threshold:
         logger.info(
