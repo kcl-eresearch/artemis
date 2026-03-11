@@ -758,7 +758,7 @@ Example: [0, 2, 5]"""
         completion = await chat_completion(
             messages=messages,
             model=settings.summary_model,
-            max_tokens=200,
+            max_tokens=4000,
         )
         usage = TokenUsage.model_validate(completion["usage"] or {})
 

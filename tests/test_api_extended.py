@@ -31,7 +31,7 @@ def _default_settings(**overrides) -> Settings:
         litellm_api_key=None,
         llm_timeout_seconds=60.0,
         summary_model="arc:apex",
-        summary_max_tokens=1024,
+        summary_max_tokens=2000,
         enable_summary=True,
         deep_research_stages=2,
         deep_research_passes=1,

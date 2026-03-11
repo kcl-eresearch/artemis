@@ -19,7 +19,7 @@ async def summarize_results(
     query: str,
     results: list[SearchResult],
     model: str,
-    max_tokens: int = 1024,
+    max_tokens: int = 2000,
 ) -> dict[str, Any]:
     """Generate an LLM-powered summary of search results.
 
