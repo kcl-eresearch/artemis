@@ -25,10 +25,19 @@ Usage examples::
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
 from artemis.writers import write_json, write_markdown, md_to_docx
+
+
+def _strip_think_tags(text: str) -> str:
+    """Remove <think>...</think> reasoning blocks and orphaned tags."""
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    text = re.sub(r"^.*?</think>", "", text, flags=re.DOTALL)
+    text = re.sub(r"<think>.*$", "", text, flags=re.DOTALL)
+    return text.strip()
 
 
 def _extract_from_artemis_json(data: dict) -> tuple[str, str | None, list, dict | None]:
@@ -80,11 +89,12 @@ def _load_input(path: str) -> tuple[str, str | None, list, dict | None]:
         if isinstance(data, dict):
             # Artemis API response format (has "output" key)
             if "output" in data:
-                return _extract_from_artemis_json(data)
+                essay, title, results, usage = _extract_from_artemis_json(data)
+                return _strip_think_tags(essay), title, results, usage
             # CLI JSON format (has "essay" key)
             if "essay" in data:
                 return (
-                    data["essay"],
+                    _strip_think_tags(data["essay"]),
                     data.get("query"),
                     data.get("results", []),
                     data.get("usage"),
@@ -94,7 +104,7 @@ def _load_input(path: str) -> tuple[str, str | None, list, dict | None]:
 
     # Treat as raw Markdown
     title = input_path.stem.replace("-", " ").replace("_", " ").title()
-    return text, title, [], None
+    return _strip_think_tags(text), title, [], None
 
 
 def main() -> None:

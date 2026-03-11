@@ -374,8 +374,13 @@ async def chat_completion(
     if not isinstance(content, str) or not content.strip():
         raise UpstreamServiceError("The LLM backend returned empty content.")
 
-    # Strip <think>...</think> reasoning blocks some models emit
-    content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+    # Strip <think>...</think> reasoning blocks some models emit.
+    # Also handle orphaned tags: leading content before a lone </think>
+    # (opening tag was outside this response) or trailing <think> without close.
+    content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
+    content = re.sub(r"^.*?</think>", "", content, flags=re.DOTALL)
+    content = re.sub(r"<think>.*$", "", content, flags=re.DOTALL)
+    content = content.strip()
     if not content:
         raise UpstreamServiceError("The LLM backend returned empty content.")
 

@@ -81,9 +81,10 @@ def write_markdown(
 
 
 def _add_hyperlink(paragraph, url: str, text: str):
-    """Add a clickable hyperlink to a python-docx paragraph."""
+    """Add a clickable, blue-underlined hyperlink to a python-docx paragraph."""
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
+    from docx.shared import Pt, RGBColor
 
     part = paragraph.part
     r_id = part.relate_to(
@@ -95,17 +96,30 @@ def _add_hyperlink(paragraph, url: str, text: str):
     hyperlink = OxmlElement("w:hyperlink")
     hyperlink.set(qn("r:id"), r_id)
 
-    r = OxmlElement("w:r")
+    run = OxmlElement("w:r")
     rPr = OxmlElement("w:rPr")
-    rStyle = OxmlElement("w:rStyle")
-    rStyle.set(qn("w:val"), "Hyperlink")
-    rPr.append(rStyle)
-    r.append(rPr)
+
+    # Blue colour
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), "0563C1")
+    rPr.append(color)
+
+    # Underline
+    u = OxmlElement("w:u")
+    u.set(qn("w:val"), "single")
+    rPr.append(u)
+
+    # Font size matching body text
+    sz = OxmlElement("w:sz")
+    sz.set(qn("w:val"), str(Pt(11).pt * 2))  # half-points
+    rPr.append(sz)
+
+    run.append(rPr)
 
     t = OxmlElement("w:t")
     t.text = text
-    r.append(t)
-    hyperlink.append(r)
+    run.append(t)
+    hyperlink.append(run)
     paragraph._p.append(hyperlink)
     return hyperlink
 
@@ -166,7 +180,7 @@ def md_to_docx(
             else:
                 r_title = r.title or r.url
                 r_url = r.url
-            para = doc.add_paragraph(f"{i}. ", style="List Number")
+            para = doc.add_paragraph(f"{i}. ")
             _add_hyperlink(para, r_url, r_title)
 
     doc.save(path)
