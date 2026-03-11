@@ -84,7 +84,7 @@ def _parse_query_list(raw_content: str) -> list[str]:
             if normalized not in queries:
                 queries.append(normalized)
     if not queries:
-        logger.warning(f"Query list empty after parsing: {raw_content[:200]}")
+        logger.warning("Query list empty after parsing: %s", raw_content[:200])
         # Return fallback queries
         return ["research topic analysis"]
     return queries
@@ -122,7 +122,7 @@ def _try_salvage_truncated_array(fragment: str) -> list[str]:
 
 def _parse_outline(raw_content: str) -> list[dict[str, str]]:
     """Parse LLM response into a research outline."""
-    logger.debug(f"LLM outline response: {raw_content[:500]}")
+    logger.debug("LLM outline response: %s", raw_content[:500])
     candidate = raw_content.strip()
     if candidate.startswith("```"):
         candidate = candidate.strip("`")
