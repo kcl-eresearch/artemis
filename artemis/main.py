@@ -23,6 +23,8 @@ import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
+import httpx
+
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -491,16 +493,41 @@ async def root() -> dict[str, str]:
 
 @app.get("/health")
 async def health() -> dict[str, object]:
-    """Health check endpoint.
+    """Health check endpoint with dependency probes.
 
-    Returns service status and configuration info including:
-    - Whether summarization is enabled
-    - Whether authentication is required
-    - Whether the summary circuit is open (due to failures)
+    Probes SearXNG connectivity and (if summary is enabled) the LLM
+    backend. Returns per-check status and an overall status of
+    "healthy" or "degraded".
     """
     settings = get_settings()
+    checks: dict[str, str] = {}
+
+    # Probe SearXNG
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+            resp = await client.get(f"{settings.searxng_api_base}/")
+            checks["searxng"] = "ok" if resp.status_code < 400 else f"http_{resp.status_code}"
+    except Exception as exc:
+        checks["searxng"] = f"error: {type(exc).__name__}"
+
+    # Probe LLM backend (only if summarization is enabled)
+    if settings.enable_summary:
+        try:
+            headers: dict[str, str] = {}
+            if settings.litellm_api_key:
+                headers["Authorization"] = f"Bearer {settings.litellm_api_key}"
+            async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+                resp = await client.get(
+                    f"{settings.litellm_base_url}/models", headers=headers,
+                )
+                checks["llm"] = "ok" if resp.status_code < 400 else f"http_{resp.status_code}"
+        except Exception as exc:
+            checks["llm"] = f"error: {type(exc).__name__}"
+
+    all_ok = all(v == "ok" for v in checks.values())
     return {
-        "status": "healthy",
+        "status": "healthy" if all_ok else "degraded",
+        "checks": checks,
         "summary_enabled": settings.enable_summary,
         "auth_enabled": bool(settings.artemis_api_key),
         "summary_circuit_open": summary_circuit.opened_until > time.time(),

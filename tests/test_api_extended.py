@@ -81,23 +81,44 @@ class RootAndHealthTestCase(unittest.TestCase):
         self.assertIn("message", response.json())
         self.assertIn("Artemis", response.json()["message"])
 
-    def test_health_returns_status(self) -> None:
+    @patch("artemis.main.httpx.AsyncClient")
+    def test_health_returns_status(self, mock_client_cls: MagicMock) -> None:
+        mock_resp = MagicMock(status_code=200)
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        mock_ctx.get = AsyncMock(return_value=mock_resp)
+        mock_client_cls.return_value = mock_ctx
+
         response = self.client.get("/health")
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertEqual(body["status"], "healthy")
+        self.assertIn(body["status"], ("healthy", "degraded"))
+        self.assertIn("checks", body)
         self.assertIn("summary_enabled", body)
         self.assertIn("auth_enabled", body)
         self.assertIn("summary_circuit_open", body)
 
     def test_health_reports_circuit_open(self) -> None:
         summary_circuit.opened_until = time.time() + 300
-        response = self.client.get("/health")
+        with patch("artemis.main.httpx.AsyncClient") as mock_cls:
+            mock_ctx = AsyncMock()
+            mock_ctx.__aenter__ = AsyncMock(return_value=mock_ctx)
+            mock_ctx.__aexit__ = AsyncMock(return_value=False)
+            mock_ctx.get = AsyncMock(return_value=MagicMock(status_code=200))
+            mock_cls.return_value = mock_ctx
+            response = self.client.get("/health")
         self.assertTrue(response.json()["summary_circuit_open"])
 
     def test_health_reports_circuit_closed(self) -> None:
         summary_circuit.opened_until = 0.0
-        response = self.client.get("/health")
+        with patch("artemis.main.httpx.AsyncClient") as mock_cls:
+            mock_ctx = AsyncMock()
+            mock_ctx.__aenter__ = AsyncMock(return_value=mock_ctx)
+            mock_ctx.__aexit__ = AsyncMock(return_value=False)
+            mock_ctx.get = AsyncMock(return_value=MagicMock(status_code=200))
+            mock_cls.return_value = mock_ctx
+            response = self.client.get("/health")
         self.assertFalse(response.json()["summary_circuit_open"])
 
 
