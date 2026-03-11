@@ -422,18 +422,34 @@ async def deep_research(
     enable_filtering: Enable keyword-based relevance filtering (default True).
     """
     settings = get_settings()
-    stages = stages or settings.deep_research_stages
-    sub_queries_per_stage = sub_queries_per_stage or settings.deep_research_subqueries
-    results_per_query = results_per_query or settings.deep_research_results_per_query
-    max_tokens = max_tokens or settings.deep_research_max_tokens
-    passes = passes or 1
+    stages = settings.deep_research_stages if stages is None else stages
+    sub_queries_per_stage = (
+        settings.deep_research_subqueries
+        if sub_queries_per_stage is None
+        else sub_queries_per_stage
+    )
+    results_per_query = (
+        settings.deep_research_results_per_query
+        if results_per_query is None
+        else results_per_query
+    )
+    max_tokens = settings.deep_research_max_tokens if max_tokens is None else max_tokens
+    passes = 1 if passes is None else passes
     content_extraction = (
         settings.deep_research_content_extraction
         if content_extraction is None
         else content_extraction
     )
-    pages_per_section = pages_per_section or settings.deep_research_pages_per_section
-    content_max_chars = content_max_chars or settings.deep_research_content_max_chars
+    pages_per_section = (
+        settings.deep_research_pages_per_section
+        if pages_per_section is None
+        else pages_per_section
+    )
+    content_max_chars = (
+        settings.deep_research_content_max_chars
+        if content_max_chars is None
+        else content_max_chars
+    )
 
     total_usage = TokenUsage()
     all_results: list[SearchResult] = []

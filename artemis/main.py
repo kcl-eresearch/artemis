@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from artemis.config import (
+    Settings,
     get_settings,
 )
 from artemis.errors import UpstreamServiceError
@@ -113,7 +114,7 @@ class ResearchPresetConfig:
     model_name: str
 
 
-def _research_preset_config(settings, preset: str) -> ResearchPresetConfig:
+def _research_preset_config(settings: Settings, preset: str) -> ResearchPresetConfig:
     if preset == "shallow-research":
         return ResearchPresetConfig(
             stages=settings.shallow_research_stages,
