@@ -18,7 +18,6 @@ Usage examples::
 
 import asyncio
 import argparse
-import json
 import re
 import sys
 from datetime import date
@@ -26,6 +25,8 @@ from datetime import date
 from dotenv import load_dotenv
 
 load_dotenv()
+
+from artemis.writers import write_json, write_markdown, md_to_docx  # noqa: E402
 
 _FORMATS = ("json", "md", "docx")
 _PRESETS = ("deep", "shallow")
@@ -46,126 +47,6 @@ def _default_output_path(query: str, fmt: str) -> str:
     slug = _slugify(query)
     today = date.today().isoformat()
     return f"{slug}-{today}.{ext}"
-
-
-def _format_sources(results: list) -> str:
-    """Build a numbered sources list from search results."""
-    if not results:
-        return ""
-    lines = ["\n\n---\n\n## Sources\n"]
-    for i, r in enumerate(results, 1):
-        title = r.title or r.url
-        lines.append(f"{i}. [{title}]({r.url})")
-    return "\n".join(lines)
-
-
-def _write_json(path: str, query: str, result, *, stdout: bool = False) -> None:
-    """Write results as JSON."""
-    output = {
-        "query": query,
-        "essay": result.essay,
-        "results": [
-            {"title": r.title, "url": r.url, "snippet": r.snippet}
-            for r in result.results
-        ],
-        "usage": result.usage.model_dump() if result.usage else None,
-    }
-    if stdout:
-        json.dump(output, sys.stdout, indent=2)
-        print()
-    else:
-        with open(path, "w") as f:
-            json.dump(output, f, indent=2)
-
-
-def _write_markdown(path: str, query: str, result, *, stdout: bool = False) -> None:
-    """Write essay as Markdown with a sources appendix."""
-    content = result.essay + _format_sources(result.results)
-    if stdout:
-        print(content)
-    else:
-        with open(path, "w") as f:
-            f.write(content)
-
-
-def _add_hyperlink(paragraph, url: str, text: str):
-    """Add a clickable hyperlink to a python-docx paragraph."""
-    from docx.oxml.ns import qn
-    from docx.oxml import OxmlElement
-
-    part = paragraph.part
-    r_id = part.relate_to(url, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", is_external=True)
-
-    hyperlink = OxmlElement("w:hyperlink")
-    hyperlink.set(qn("r:id"), r_id)
-
-    r = OxmlElement("w:r")
-    rPr = OxmlElement("w:rPr")
-    rStyle = OxmlElement("w:rStyle")
-    rStyle.set(qn("w:val"), "Hyperlink")
-    rPr.append(rStyle)
-    r.append(rPr)
-
-    t = OxmlElement("w:t")
-    t.text = text
-    r.append(t)
-    hyperlink.append(r)
-    paragraph._p.append(hyperlink)
-    return hyperlink
-
-
-def _write_docx(path: str, query: str, result, **_kwargs) -> None:
-    """Convert the markdown essay into a formatted DOCX document."""
-    from docx import Document
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-
-    doc = Document()
-
-    # Title
-    title_para = doc.add_heading(query, level=0)
-    title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-
-    # Parse markdown line by line
-    for line in result.essay.split("\n"):
-        stripped = line.strip()
-        if not stripped:
-            doc.add_paragraph("")
-            continue
-
-        # Headings
-        if stripped.startswith("#### "):
-            doc.add_heading(stripped[5:], level=4)
-        elif stripped.startswith("### "):
-            doc.add_heading(stripped[4:], level=3)
-        elif stripped.startswith("## "):
-            doc.add_heading(stripped[3:], level=2)
-        elif stripped.startswith("# "):
-            doc.add_heading(stripped[2:], level=1)
-        elif stripped.startswith("- ") or stripped.startswith("* "):
-            doc.add_paragraph(stripped[2:], style="List Bullet")
-        elif re.match(r"^\d+\.\s", stripped):
-            text = re.sub(r"^\d+\.\s", "", stripped)
-            doc.add_paragraph(text, style="List Number")
-        else:
-            doc.add_paragraph(stripped)
-
-    # Sources appendix
-    if result.results:
-        doc.add_page_break()
-        doc.add_heading("Sources", level=1)
-        for i, r in enumerate(result.results, 1):
-            title = r.title or r.url
-            para = doc.add_paragraph(f"{i}. ", style="List Number")
-            _add_hyperlink(para, r.url, title)
-
-    doc.save(path)
-
-
-_WRITERS = {
-    "json": _write_json,
-    "md": _write_markdown,
-    "docx": _write_docx,
-}
 
 
 def _progress_callback(quiet: bool):
@@ -256,23 +137,26 @@ async def run_research(
         sys.exit(1)
 
     # Write output
-    writer = _WRITERS[fmt]
-    if stdout:
-        writer(output, query, result, stdout=True)
-    else:
-        writer(output, query, result)
-        if not quiet:
-            print(f"\n✅ Saved to {output}", file=sys.stderr)
+    usage_dict = result.usage.model_dump() if result.usage else None
+    if fmt == "json":
+        write_json(output, query, result.essay, result.results, usage_dict, stdout=stdout)
+    elif fmt == "md":
+        write_markdown(output, result.essay, result.results, stdout=stdout)
+    elif fmt == "docx":
+        md_to_docx(output, result.essay, title=query, results=result.results)
+
+    if not stdout and not quiet:
+        print(f"\n✅ Saved to {output}", file=sys.stderr)
+        print(
+            f"   {len(result.essay)} chars | {len(result.results)} sources",
+            file=sys.stderr,
+        )
+        if result.usage:
             print(
-                f"   {len(result.essay)} chars | {len(result.results)} sources",
+                f"   Tokens: {result.usage.total_tokens} "
+                f"(in={result.usage.input_tokens} out={result.usage.output_tokens})",
                 file=sys.stderr,
             )
-            if result.usage:
-                print(
-                    f"   Tokens: {result.usage.total_tokens} "
-                    f"(in={result.usage.input_tokens} out={result.usage.output_tokens})",
-                    file=sys.stderr,
-                )
 
 
 def main() -> None:
