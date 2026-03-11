@@ -327,6 +327,9 @@ async def chat_completion(
         body["tool_choice"] = "none"
     if response_format is not None:
         body["response_format"] = response_format
+    # Ask the backend to suppress <think> reasoning blocks if supported
+    # (works with sglang, vllm, and other OpenAI-compatible backends)
+    body["include_reasoning"] = False
 
     try:
         response = await client.post(
