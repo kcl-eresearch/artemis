@@ -58,6 +58,9 @@ def _default_settings(**overrides) -> Settings:
         cache_max_entries=1000,
         embedding_model=None,
         semantic_similarity_threshold=0.92,
+        log_format="text",
+        playwright_context_recycle_pages=50,
+        playwright_max_html_bytes=5242880,
     )
     defaults.update(overrides)
     return Settings(**defaults)

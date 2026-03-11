@@ -14,6 +14,8 @@ The application includes:
 
 from dataclasses import dataclass
 import asyncio
+import contextvars
+import json as _json
 import logging
 import secrets
 import time
@@ -21,7 +23,7 @@ import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -50,14 +52,61 @@ from artemis.searcher import search_searxng
 from artemis.searcher import close_client as close_searxng_client
 from artemis.summarizer import summarize_results
 
+# ---------------------------------------------------------------------------
+# Request ID context variable — set by middleware, read by log formatter
+# ---------------------------------------------------------------------------
+request_id_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "request_id", default="-"
+)
+
+
+class _RequestIdFilter(logging.Filter):
+    """Inject request_id from context into every log record."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = request_id_ctx.get("-")  # type: ignore[attr-defined]
+        return True
+
+
+class _JsonFormatter(logging.Formatter):
+    """Emit log records as single-line JSON objects."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        obj = {
+            "ts": self.formatTime(record),
+            "level": record.levelname,
+            "logger": record.name,
+            "request_id": getattr(record, "request_id", "-"),
+            "msg": record.getMessage(),
+        }
+        if record.exc_info and record.exc_info[1]:
+            obj["exception"] = self.formatException(record.exc_info)
+        return _json.dumps(obj)
+
+
+def _configure_logging(settings_obj: Settings) -> None:
+    """Configure root logger with request ID support."""
+    root = logging.getLogger()
+    root.setLevel(getattr(logging, settings_obj.log_level, logging.INFO))
+    root.handlers.clear()
+
+    handler = logging.StreamHandler()
+    handler.addFilter(_RequestIdFilter())
+
+    if settings_obj.log_format == "json":
+        handler.setFormatter(_JsonFormatter())
+    else:
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s [%(name)s] [%(request_id)s] %(message)s"
+        ))
+    root.addHandler(handler)
+
+
 # Load settings at module import time to fail fast on config errors
 initial_settings = get_settings()
 
-# Configure logging based on settings
-logging.basicConfig(
-    level=getattr(logging, initial_settings.log_level, logging.INFO),
-    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-)
+# Configure structured logging
+_configure_logging(initial_settings)
 logger = logging.getLogger(__name__)
 
 # Log security warnings at startup
@@ -155,6 +204,19 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """Attach a unique request ID to every request for log correlation."""
+    rid = request.headers.get("x-request-id") or str(uuid.uuid4())
+    token = request_id_ctx.set(rid)
+    try:
+        response = await call_next(request)
+        response.headers["x-request-id"] = rid
+        return response
+    finally:
+        request_id_ctx.reset(token)
 
 
 @app.exception_handler(UpstreamServiceError)

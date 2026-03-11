@@ -221,6 +221,28 @@ def _parse_log_level(name: str, default: str = "INFO") -> str:
     return raw_value
 
 
+_LOG_FORMATS = {"text", "json"}
+
+
+def _parse_log_format(name: str, default: str = "text") -> str:
+    """Parse log format from environment variable.
+
+    Args:
+        name: Environment variable name
+        default: Default format if variable is not set (default: text)
+
+    Returns:
+        Validated log format string ("text" or "json")
+
+    Raises:
+        ConfigError: If the value is not a valid log format
+    """
+    raw_value = os.getenv(name, default).strip().lower()
+    if raw_value not in _LOG_FORMATS:
+        raise ConfigError(f"{name} must be one of: text, json.")
+    return raw_value
+
+
 @dataclass(frozen=True)
 class Settings:
     """Immutable configuration container for Artemis.
@@ -263,6 +285,9 @@ class Settings:
         cache_max_entries: Maximum entries per cache before oldest are evicted
         embedding_model: Model for query embeddings (enables semantic dedup when set)
         semantic_similarity_threshold: Cosine similarity threshold for semantic cache hits
+        log_format: Log output format ("text" or "json")
+        playwright_context_recycle_pages: Recycle Playwright context after this many pages
+        playwright_max_html_bytes: Maximum HTML bytes to extract per page
     """
 
     searxng_api_base: str
@@ -298,6 +323,9 @@ class Settings:
     cache_max_entries: int
     embedding_model: str | None
     semantic_similarity_threshold: float
+    log_format: str
+    playwright_context_recycle_pages: int
+    playwright_max_html_bytes: int
 
 
 @lru_cache(maxsize=1)
@@ -401,6 +429,13 @@ def get_settings() -> Settings:
         embedding_model=_parse_optional_str("EMBEDDING_MODEL"),
         semantic_similarity_threshold=_parse_float(
             "SEMANTIC_SIMILARITY_THRESHOLD", 0.92, minimum=0.5, maximum=1.0
+        ),
+        log_format=_parse_log_format("LOG_FORMAT"),
+        playwright_context_recycle_pages=_parse_int(
+            "PLAYWRIGHT_CONTEXT_RECYCLE_PAGES", 50, minimum=1, maximum=10000
+        ),
+        playwright_max_html_bytes=_parse_int(
+            "PLAYWRIGHT_MAX_HTML_BYTES", 5 * 1024 * 1024, minimum=65536, maximum=50 * 1024 * 1024
         ),
     )
 

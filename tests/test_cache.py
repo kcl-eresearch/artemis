@@ -457,6 +457,9 @@ class SemanticSearchCacheTestCase(unittest.IsolatedAsyncioTestCase):
             cache_max_entries=1000,
             embedding_model="text-embedding-3-small",
             semantic_similarity_threshold=0.90,
+            log_format="text",
+            playwright_context_recycle_pages=50,
+            playwright_max_html_bytes=5242880,
         )
         mock_settings.return_value = settings
 
@@ -528,6 +531,9 @@ class SemanticSearchCacheTestCase(unittest.IsolatedAsyncioTestCase):
             cache_max_entries=1000,
             embedding_model="text-embedding-3-small",
             semantic_similarity_threshold=0.90,
+            log_format="text",
+            playwright_context_recycle_pages=50,
+            playwright_max_html_bytes=5242880,
         )
         mock_settings.return_value = settings
 
@@ -593,6 +599,9 @@ class SemanticSearchCacheTestCase(unittest.IsolatedAsyncioTestCase):
             cache_max_entries=1000,
             embedding_model=None,  # Disabled
             semantic_similarity_threshold=0.92,
+            log_format="text",
+            playwright_context_recycle_pages=50,
+            playwright_max_html_bytes=5242880,
         )
         mock_settings.return_value = settings
 
