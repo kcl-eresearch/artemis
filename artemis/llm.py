@@ -148,22 +148,23 @@ def _normalize_usage(usage: Any) -> dict[str, int] | None:
     if not isinstance(usage, dict):
         return None
 
-    input_tokens = int(
-        usage.get("input_tokens", 0)
-        or usage.get("prompt_tokens", 0)
-        or 0
-    )
-    output_tokens = int(
-        usage.get("output_tokens", 0)
-        or usage.get("completion_tokens", 0)
-        or 0
-    )
-    total_tokens = int(usage.get("total_tokens", 0) or 0)
+    raw_input = usage.get("input_tokens")
+    if raw_input is None:
+        raw_input = usage.get("prompt_tokens", 0)
+    input_tokens = int(raw_input or 0)
+
+    raw_output = usage.get("output_tokens")
+    if raw_output is None:
+        raw_output = usage.get("completion_tokens", 0)
+    output_tokens = int(raw_output or 0)
+
+    raw_total = usage.get("total_tokens")
+    total_tokens = int(raw_total) if raw_total is not None else (input_tokens + output_tokens)
 
     return {
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
-        "total_tokens": total_tokens or (input_tokens + output_tokens),
+        "total_tokens": total_tokens,
     }
 
 
