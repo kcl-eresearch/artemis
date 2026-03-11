@@ -348,6 +348,12 @@ async def _stream_responses(request: ResponsesRequest) -> StreamingResponse:
             summary, usage, warnings = await _build_summary(request.input, results)
             yield summary or _fallback_text(results)
 
+            response_usage = usage or TokenUsage()
+            response_usage.search_requests = 1
+            citation_chars = sum(len(r.snippet or "") + len(r.title) for r in results)
+            response_usage.citation_tokens = citation_chars // 4
+            yield f"\n[USAGE] {response_usage.model_dump_json()}"
+
     return StreamingResponse(event_generator(), media_type="text/plain")
 
 
