@@ -107,7 +107,7 @@ class ResponsesAPIResponseTestCase(unittest.TestCase):
     def test_defaults(self) -> None:
         resp = ResponsesAPIResponse(
             id="test-id",
-            created=1000,
+            created_at=1000,
             model="artemis-search",
             output=[],
         )
@@ -119,7 +119,7 @@ class ResponsesAPIResponseTestCase(unittest.TestCase):
     def test_full_response_serialization(self) -> None:
         resp = ResponsesAPIResponse(
             id="id-1",
-            created=1234567890,
+            created_at=1234567890,
             model="artemis-search",
             output=[
                 AssistantMessage(

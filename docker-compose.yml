@@ -24,7 +24,7 @@ services:
       - ALLOWED_ORIGINS=http://localhost:3000
       - ARTEMIS_API_KEY=${ARTEMIS_API_KEY:-}
       - ENABLE_SUMMARY=true
-      - SUMMARY_MODEL=openai/gpt-4o-mini
+      - SUMMARY_MODEL=qwen3.5:27b
       # Add your API key:
       # - OPENAI_API_KEY=sk-...
     depends_on:

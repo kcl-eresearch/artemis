@@ -632,7 +632,7 @@ async def responses(
 
         return ResponsesAPIResponse(
             id=str(uuid.uuid4()),
-            created=_created_timestamp(),
+            created_at=_created_timestamp(),
             model=preset_config.model_name,
             output=[
                 _message_output(research_run.essay),
@@ -651,7 +651,7 @@ async def responses(
 
     return ResponsesAPIResponse(
         id=str(uuid.uuid4()),
-        created=_created_timestamp(),
+        created_at=_created_timestamp(),
         model="artemis-search",
         output=[
             _message_output(summary or _fallback_text(results)),

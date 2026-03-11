@@ -204,7 +204,7 @@ class ResponsesAPIResponse(BaseModel):
 
     Attributes:
         id: Unique response identifier
-        created: Unix timestamp of creation
+        created_at: Unix timestamp of creation
         model: Model identifier used
         status: Always "completed" for successful responses
         output: List of message and/or search results blocks
@@ -214,7 +214,7 @@ class ResponsesAPIResponse(BaseModel):
 
     id: str
     object: Literal["response"] = "response"
-    created: int
+    created_at: int
     model: str
     status: Literal["completed"] = "completed"
     output: list[AssistantMessage | SearchResultsBlock]
