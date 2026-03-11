@@ -357,64 +357,77 @@ async def _stream_responses(request: ResponsesRequest) -> StreamingResponse:
 
     Uses an asyncio.Queue so progress events from deep_research are
     yielded to the client in real-time rather than collected and replayed.
+
+    If the client disconnects mid-stream, the finally block cancels any
+    in-flight research task to avoid wasting LLM/Playwright resources.
     """
     async def event_generator():
         settings = get_settings()
+        research_task: asyncio.Task | None = None
 
-        yield f"[Starting research on: {request.input}]\n\n"
+        try:
+            yield f"[Starting research on: {request.input}]\n\n"
 
-        if request.preset in {"deep-research", "shallow-research"}:
-            queue: asyncio.Queue[str] = asyncio.Queue()
-            preset_config = _research_preset_config(settings, request.preset)
+            if request.preset in {"deep-research", "shallow-research"}:
+                queue: asyncio.Queue[str] = asyncio.Queue()
+                preset_config = _research_preset_config(settings, request.preset)
 
-            def progress_cb(stage: str, msg: str):
-                queue.put_nowait(f"[{stage.upper()}] {msg}")
+                def progress_cb(stage: str, msg: str):
+                    queue.put_nowait(f"[{stage.upper()}] {msg}")
 
-            research_task = asyncio.create_task(deep_research(
-                request.input,
-                stages=request.max_steps or preset_config.stages,
-                passes=preset_config.passes,
-                sub_queries_per_stage=preset_config.subqueries,
-                results_per_query=preset_config.results_per_query,
-                max_tokens=preset_config.max_tokens,
-                outline=request.outline,
-                content_extraction=preset_config.content_extraction,
-                pages_per_section=preset_config.pages_per_section,
-                content_max_chars=preset_config.content_max_chars,
-                progress_callback=progress_cb,
-            ))
+                research_task = asyncio.create_task(deep_research(
+                    request.input,
+                    stages=request.max_steps or preset_config.stages,
+                    passes=preset_config.passes,
+                    sub_queries_per_stage=preset_config.subqueries,
+                    results_per_query=preset_config.results_per_query,
+                    max_tokens=preset_config.max_tokens,
+                    outline=request.outline,
+                    content_extraction=preset_config.content_extraction,
+                    pages_per_section=preset_config.pages_per_section,
+                    content_max_chars=preset_config.content_max_chars,
+                    progress_callback=progress_cb,
+                ))
 
-            # Yield progress events as they arrive
-            while not research_task.done():
+                # Yield progress events as they arrive
+                while not research_task.done():
+                    try:
+                        msg = await asyncio.wait_for(queue.get(), timeout=0.5)
+                        yield msg + "\n\n"
+                    except asyncio.TimeoutError:
+                        continue
+
+                # Drain any remaining queued messages
+                while not queue.empty():
+                    yield queue.get_nowait() + "\n\n"
+
+                # Propagate any exception from the research task
+                research_run = research_task.result()
+
+                yield research_run.essay
+                yield f"\n\n[Found {len(research_run.results)} sources]"
+                yield f"\n[USAGE] {research_run.usage.model_dump_json()}"
+            else:
+                yield "[Searching...]\n"
+                results = await search_searxng(query=request.input, max_results=10)
+                yield f"[Found {len(results)} results]\n\n"
+
+                summary, usage, warnings = await _build_summary(request.input, results)
+                yield summary or _fallback_text(results)
+
+                response_usage = usage or TokenUsage()
+                response_usage.search_requests = 1
+                citation_chars = sum(len(r.snippet or "") + len(r.title) for r in results)
+                response_usage.citation_tokens = citation_chars // 4
+                yield f"\n[USAGE] {response_usage.model_dump_json()}"
+        finally:
+            if research_task is not None and not research_task.done():
+                research_task.cancel()
                 try:
-                    msg = await asyncio.wait_for(queue.get(), timeout=0.5)
-                    yield msg + "\n\n"
-                except asyncio.TimeoutError:
-                    continue
-
-            # Drain any remaining queued messages
-            while not queue.empty():
-                yield queue.get_nowait() + "\n\n"
-
-            # Propagate any exception from the research task
-            research_run = research_task.result()
-
-            yield research_run.essay
-            yield f"\n\n[Found {len(research_run.results)} sources]"
-            yield f"\n[USAGE] {research_run.usage.model_dump_json()}"
-        else:
-            yield "[Searching...]\n"
-            results = await search_searxng(query=request.input, max_results=10)
-            yield f"[Found {len(results)} results]\n\n"
-
-            summary, usage, warnings = await _build_summary(request.input, results)
-            yield summary or _fallback_text(results)
-
-            response_usage = usage or TokenUsage()
-            response_usage.search_requests = 1
-            citation_chars = sum(len(r.snippet or "") + len(r.title) for r in results)
-            response_usage.citation_tokens = citation_chars // 4
-            yield f"\n[USAGE] {response_usage.model_dump_json()}"
+                    await research_task
+                except asyncio.CancelledError:
+                    pass
+                logger.info("Research task cancelled due to client disconnect")
 
     return StreamingResponse(event_generator(), media_type="text/plain")
 
@@ -544,18 +557,22 @@ async def search(request: SearchRequest) -> SearchResponse:
     response_model=None,
     dependencies=[Depends(verify_api_key)],
 )
-async def responses(request: ResponsesRequest) -> ResponsesAPIResponse | StreamingResponse:
+async def responses(
+    request: ResponsesRequest, http_request: Request
+) -> ResponsesAPIResponse | StreamingResponse:
     """Perplexity-compatible responses endpoint.
 
     Supports streaming via SSE when streaming=true.
+    For non-streaming research requests, polls for client disconnect
+    and cancels the research task if the client goes away.
     """
     if request.streaming:
         return await _stream_responses(request)
-    
+
     if request.preset in {"deep-research", "shallow-research"}:
         settings = get_settings()
         preset_config = _research_preset_config(settings, request.preset)
-        research_run = await deep_research(
+        research_task = asyncio.create_task(deep_research(
             request.input,
             stages=request.max_steps or preset_config.stages,
             passes=preset_config.passes,
@@ -566,7 +583,26 @@ async def responses(request: ResponsesRequest) -> ResponsesAPIResponse | Streami
             content_extraction=preset_config.content_extraction,
             pages_per_section=preset_config.pages_per_section,
             content_max_chars=preset_config.content_max_chars,
-        )
+        ))
+        try:
+            while not research_task.done():
+                if await http_request.is_disconnected():
+                    research_task.cancel()
+                    try:
+                        await research_task
+                    except asyncio.CancelledError:
+                        pass
+                    logger.info("Research task cancelled: client disconnected")
+                    return JSONResponse(
+                        status_code=499,
+                        content={"detail": "Client disconnected"},
+                    )
+                await asyncio.sleep(0.5)
+            research_run = research_task.result()
+        except asyncio.CancelledError:
+            research_task.cancel()
+            raise
+
         return ResponsesAPIResponse(
             id=str(uuid.uuid4()),
             created=_created_timestamp(),
