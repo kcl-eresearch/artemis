@@ -1,10 +1,11 @@
 # Artemis
 
-Artemis provides a Perplexity-compatible API interface over SearXNG. Use it as a drop-in replacement for Perplexity's API while running your own search infrastructure.
+Artemis provides an LLM model layer incorporating search via SearXNG, content extraction via Playwright and LLM synthesis via LiteLLM.
+The end result is a researched document answering the query.
 
 ## Features
 
-- **Perplexity-compatible API** - Drop-in replacement for Perplexity clients
+- **Perplexity-compatible API**
 - **SearXNG backend** - Your own search instance, no external dependencies
 - **Deep research mode** - Multi-stage adaptive research with essay synthesis
 - **Content extraction** - Fetches full page content via Playwright (headless Chromium) + trafilatura, with LLM-based relevance selection to extract only the most useful pages
