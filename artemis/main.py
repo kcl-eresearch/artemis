@@ -49,7 +49,7 @@ from artemis.models import (
     SearchResultsBlock,
     TokenUsage,
 )
-from artemis.researcher import deep_research
+from artemis.researcher import deep_research, generate_outline
 from artemis.searcher import search_searxng
 from artemis.searcher import close_client as close_searxng_client
 from artemis.summarizer import summarize_results
@@ -370,6 +370,16 @@ async def _stream_responses(request: ResponsesRequest) -> StreamingResponse:
         try:
             yield f"[Starting research on: {request.input}]\n\n"
 
+            if request.outline_only and request.preset in {"deep-research", "shallow-research"}:
+                preset_config = _research_preset_config(settings, request.preset)
+                outline, usage = await generate_outline(
+                    request.input,
+                    num_sections=request.max_steps or preset_config.stages,
+                )
+                yield _json.dumps(outline, indent=2)
+                yield f"\n[USAGE] {usage.model_dump_json()}"
+                return
+
             if request.preset in {"deep-research", "shallow-research"}:
                 queue: asyncio.Queue[str] = asyncio.Queue()
                 preset_config = _research_preset_config(settings, request.preset)
@@ -595,6 +605,22 @@ async def responses(
     """
     if request.streaming:
         return await _stream_responses(request)
+
+    if request.outline_only and request.preset in {"deep-research", "shallow-research"}:
+        settings = get_settings()
+        preset_config = _research_preset_config(settings, request.preset)
+        outline, usage = await generate_outline(
+            request.input,
+            num_sections=request.max_steps or preset_config.stages,
+        )
+        return ResponsesAPIResponse(
+            id=str(uuid.uuid4()),
+            created_at=_created_timestamp(),
+            model=preset_config.model_name,
+            output=[_message_output(_json.dumps(outline, indent=2))],
+            outline=outline,
+            usage=usage,
+        )
 
     if request.preset in {"deep-research", "shallow-research"}:
         settings = get_settings()

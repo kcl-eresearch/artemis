@@ -130,6 +130,7 @@ class ResponsesRequest(BaseModel):
     input: str = Field(min_length=1, max_length=4000)
     preset: Literal["fast-search", "shallow-research", "deep-research"] = "fast-search"
     outline: list[dict[str, str]] | None = None
+    outline_only: bool = False
     max_steps: int | None = Field(default=None, ge=1, le=10)
     streaming: bool = False
 
@@ -218,6 +219,7 @@ class ResponsesAPIResponse(BaseModel):
     model: str
     status: Literal["completed"] = "completed"
     output: list[AssistantMessage | SearchResultsBlock]
+    outline: list[dict[str, str]] | None = None
     usage: TokenUsage = Field(default_factory=TokenUsage)
     warnings: list[str] = Field(default_factory=list)
 

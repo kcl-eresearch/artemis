@@ -69,6 +69,21 @@ def _progress_callback(quiet: bool):
     return show_progress
 
 
+async def run_outline(query: str, stages: int | None, preset: str) -> None:
+    import json
+    from artemis.config import get_settings
+    from artemis.researcher import generate_outline
+
+    settings = get_settings()
+    if preset == "shallow":
+        num_sections = stages or settings.shallow_research_stages
+    else:
+        num_sections = stages or settings.deep_research_stages
+
+    outline, _ = await generate_outline(query, num_sections=num_sections)
+    print(json.dumps(outline, indent=2))
+
+
 async def run_research(
     query: str,
     fmt: str,
@@ -207,7 +222,16 @@ def main() -> None:
         action="store_true",
         help="Suppress progress output",
     )
+    parser.add_argument(
+        "--outline-only",
+        action="store_true",
+        help="Generate and print the research outline as JSON, then exit",
+    )
     args = parser.parse_args()
+
+    if args.outline_only:
+        asyncio.run(run_outline(query=args.query, stages=args.stages, preset=args.preset))
+        return
 
     asyncio.run(
         run_research(
