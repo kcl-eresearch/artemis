@@ -61,6 +61,7 @@ def _default_settings(**overrides) -> Settings:
         log_format="text",
         playwright_context_recycle_pages=50,
         playwright_max_html_bytes=5242880,
+        synthesis_tool_rounds=0,
     )
     defaults.update(overrides)
     return Settings(**defaults)

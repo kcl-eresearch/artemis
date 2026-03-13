@@ -58,7 +58,7 @@ async def summarize_results(
 
     system = (
         "You are a research assistant. Based on the search results returned by the "
-        "web_search tool, provide a concise, informative summary that answers the "
+        "web searches, provide a concise, informative summary that answers the "
         "user's query.\n\n"
         "Please provide a well-structured summary that:\n"
         "1. Directly addresses the search query\n"

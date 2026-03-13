@@ -460,6 +460,7 @@ class SemanticSearchCacheTestCase(unittest.IsolatedAsyncioTestCase):
             log_format="text",
             playwright_context_recycle_pages=50,
             playwright_max_html_bytes=5242880,
+            synthesis_tool_rounds=0,
         )
         mock_settings.return_value = settings
 
@@ -534,6 +535,7 @@ class SemanticSearchCacheTestCase(unittest.IsolatedAsyncioTestCase):
             log_format="text",
             playwright_context_recycle_pages=50,
             playwright_max_html_bytes=5242880,
+            synthesis_tool_rounds=0,
         )
         mock_settings.return_value = settings
 
@@ -602,6 +604,7 @@ class SemanticSearchCacheTestCase(unittest.IsolatedAsyncioTestCase):
             log_format="text",
             playwright_context_recycle_pages=50,
             playwright_max_html_bytes=5242880,
+            synthesis_tool_rounds=0,
         )
         mock_settings.return_value = settings
 

@@ -288,6 +288,8 @@ class Settings:
         log_format: Log output format ("text" or "json")
         playwright_context_recycle_pages: Recycle Playwright context after this many pages
         playwright_max_html_bytes: Maximum HTML bytes to extract per page
+        synthesis_tool_rounds: Max rounds of live web_search tool calls during synthesis
+            (0 = disabled; model writes from pre-loaded results only)
     """
 
     searxng_api_base: str
@@ -326,6 +328,7 @@ class Settings:
     log_format: str
     playwright_context_recycle_pages: int
     playwright_max_html_bytes: int
+    synthesis_tool_rounds: int
 
 
 @lru_cache(maxsize=1)
@@ -436,6 +439,9 @@ def get_settings() -> Settings:
         ),
         playwright_max_html_bytes=_parse_int(
             "PLAYWRIGHT_MAX_HTML_BYTES", 5 * 1024 * 1024, minimum=65536, maximum=50 * 1024 * 1024
+        ),
+        synthesis_tool_rounds=_parse_int(
+            "SYNTHESIS_TOOL_ROUNDS", 0, minimum=0, maximum=10
         ),
     )
 

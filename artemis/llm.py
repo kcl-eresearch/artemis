@@ -18,6 +18,7 @@ against prompt injection.  Use :func:`build_tool_messages` to construct the
 correct conversation structure.
 """
 
+import json
 import logging
 import re
 import uuid
@@ -251,6 +252,258 @@ def build_tool_messages(
     ]
 
 
+def _extract_message_content(
+    data: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Extract the assistant message and its text content from a /chat/completions response.
+
+    Returns ``(message, content)`` where *content* is ``None`` when the
+    response contains tool calls instead of text (or is otherwise empty).
+
+    Raises:
+        UpstreamServiceError: If the response structure is fundamentally invalid.
+    """
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise UpstreamServiceError("The LLM backend returned no completion choices.")
+
+    first_choice = choices[0]
+    if not isinstance(first_choice, dict):
+        raise UpstreamServiceError("The LLM backend returned an invalid choice payload.")
+
+    message = first_choice.get("message")
+    if not isinstance(message, dict):
+        raise UpstreamServiceError("The LLM backend returned an invalid message payload.")
+
+    content = message.get("content")
+    # Some APIs return content as a list of blocks, e.g. [{"type":"text","text":"..."}]
+    if isinstance(content, list):
+        content = "".join(
+            block.get("text", "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        )
+    if not isinstance(content, str) or not content.strip():
+        return message, None
+    return message, content
+
+
+async def _post_completion(
+    client: httpx.AsyncClient,
+    url: str,
+    body: dict[str, Any],
+) -> dict[str, Any]:
+    """POST to a /chat/completions endpoint and return the parsed JSON response."""
+    try:
+        response = await client.post(url, json=body)
+        response.raise_for_status()
+    except httpx.TimeoutException as exc:
+        raise UpstreamServiceError("The LLM backend timed out.") from exc
+    except httpx.HTTPStatusError as exc:
+        raise UpstreamServiceError(
+            f"The LLM backend returned HTTP {exc.response.status_code}."
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise UpstreamServiceError("The LLM backend request failed.") from exc
+
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise UpstreamServiceError("The LLM backend returned invalid JSON.") from exc
+
+
+def _strip_think_tags(content: str) -> str:
+    """Strip <think>…</think> reasoning blocks and orphaned tags."""
+    content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
+    content = re.sub(r"^.*?</think>", "", content, flags=re.DOTALL)
+    content = re.sub(r"<think>.*$", "", content, flags=re.DOTALL)
+    return content.strip()
+
+
+async def agentic_chat_completion(
+    *,
+    messages: list[dict[str, Any]],
+    model: str,
+    max_tokens: int,
+    tool_handlers: dict[str, Any],
+    max_tool_rounds: int = 5,
+    response_format: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Chat completion with a live tool-execution loop.
+
+    Declares ``tool_handlers`` as callable tools and executes any tool calls
+    the model makes, feeding results back until it produces a text response.
+
+    If ``messages`` already contain tool-call history (e.g. from
+    :func:`build_tool_messages`), those tool names are also declared so the
+    API accepts the conversation.  When both a historical call and an active
+    handler share the same name, the handler's parameter schema wins.
+
+    Args:
+        messages: Conversation so far (may include pre-loaded tool-call history).
+        model: LLM model identifier.
+        max_tokens: Maximum tokens in the final response.
+        tool_handlers: Mapping of tool name → async callable.  Each callable
+            receives keyword arguments extracted from the model's tool-call
+            arguments JSON and must return a ``str`` result.
+        max_tool_rounds: Maximum number of tool-call rounds before forcing a
+            text response with ``tool_choice="none"``.
+        response_format: Optional response format hint.
+
+    Returns:
+        Dictionary with:
+        - ``"content"``: Generated text response
+        - ``"usage"``: Accumulated normalised token usage across all rounds
+        - ``"tool_calls_made"``: Total number of individual tool calls executed
+    """
+    settings = get_settings()
+    model_name = model.split("/")[-1] if "/" in model else model
+    client = _get_client()
+    url = f"{settings.litellm_base_url}/chat/completions"
+
+    # Collect all tool names: ones we can execute + historical ones already in messages
+    active_names: set[str] = set(tool_handlers.keys())
+    history_names: set[str] = set()
+    for m in messages:
+        for tc in m.get("tool_calls", []):
+            name = tc.get("function", {}).get("name")
+            if name:
+                history_names.add(name)
+
+    tools: list[dict[str, Any]] = []
+    for name in sorted(active_names | history_names):
+        if name in active_names:
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": "Search the web for information.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "query": {
+                                    "type": "string",
+                                    "description": "Search query string",
+                                }
+                            },
+                            "required": ["query"],
+                        },
+                    },
+                }
+            )
+        else:
+            # Historical-only: declared so the API accepts the existing turn
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": "Retrieve information from the web.",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            )
+
+    current_messages = list(messages)
+    accumulated_usage: dict[str, int] = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+    }
+    total_tool_calls = 0
+
+    for round_num in range(max_tool_rounds + 1):
+        # On the last allowed round force a text response
+        tool_choice = "none" if round_num >= max_tool_rounds else "auto"
+
+        body: dict[str, Any] = {
+            "model": model_name,
+            "messages": current_messages,
+            "max_tokens": max_tokens,
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "include_reasoning": False,
+        }
+        if response_format is not None:
+            body["response_format"] = response_format
+
+        data = await _post_completion(client, url, body)
+
+        round_usage = _normalize_usage(data.get("usage"))
+        if round_usage:
+            for k in accumulated_usage:
+                accumulated_usage[k] += round_usage.get(k, 0)
+
+        message, content = _extract_message_content(data)
+
+        if content is not None:
+            content = _strip_think_tags(content)
+            if content:
+                return {
+                    "content": content,
+                    "usage": accumulated_usage,
+                    "tool_calls_made": total_tool_calls,
+                }
+
+        tool_calls_in_response = message.get("tool_calls") if message else None
+        if not tool_calls_in_response:
+            raise UpstreamServiceError("The LLM backend returned empty content.")
+
+        if round_num >= max_tool_rounds:
+            raise UpstreamServiceError(
+                f"Model made tool calls across all {max_tool_rounds} rounds "
+                "without producing a text response."
+            )
+
+        logger.info(
+            "Synthesis tool round %d/%d: %d call(s)",
+            round_num + 1,
+            max_tool_rounds,
+            len(tool_calls_in_response),
+        )
+
+        current_messages.append(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": tool_calls_in_response,
+            }
+        )
+
+        for tc in tool_calls_in_response:
+            tc_id = tc.get("id", "")
+            fn = tc.get("function", {})
+            tool_name = fn.get("name", "")
+            try:
+                tool_args = json.loads(fn.get("arguments", "{}"))
+            except json.JSONDecodeError:
+                tool_args = {}
+
+            handler = tool_handlers.get(tool_name)
+            if handler:
+                try:
+                    result = await handler(**tool_args)
+                    total_tool_calls += 1
+                except Exception as exc:
+                    logger.warning("Tool handler %r failed: %s", tool_name, exc)
+                    result = f"Search failed: {exc}"
+            else:
+                result = f"Unknown tool: {tool_name}"
+
+            current_messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "content": result,
+                }
+            )
+
+    raise UpstreamServiceError(
+        "Agentic loop exhausted without producing a text response."
+    )
+
+
 async def chat_completion(
     prompt: str | None = None,
     *,
@@ -331,59 +584,84 @@ async def chat_completion(
     # (works with sglang, vllm, and other OpenAI-compatible backends)
     body["include_reasoning"] = False
 
-    try:
-        response = await client.post(
-            f"{settings.litellm_base_url}/chat/completions",
-            json=body,
+    data = await _post_completion(client, f"{settings.litellm_base_url}/chat/completions", body)
+
+    message, content = _extract_message_content(data)
+
+    # Handle models that ignore tool_choice="none" and return tool calls instead
+    # of text content.  Fulfil each call with an empty result and retry once so
+    # the model writes its actual response.
+    if content is None:
+        tool_calls_in_response = message.get("tool_calls") if message else None
+        if not tool_calls_in_response:
+            raise UpstreamServiceError("The LLM backend returned empty content.")
+
+        logger.warning(
+            "Model returned %d tool call(s) instead of text content; "
+            "fulfilling with empty results and retrying",
+            len(tool_calls_in_response),
         )
-        response.raise_for_status()
-    except httpx.TimeoutException as exc:
-        raise UpstreamServiceError("The LLM backend timed out.") from exc
-    except httpx.HTTPStatusError as exc:
-        raise UpstreamServiceError(
-            f"The LLM backend returned HTTP {exc.response.status_code}."
-        ) from exc
-    except httpx.HTTPError as exc:
-        raise UpstreamServiceError("The LLM backend request failed.") from exc
-
-    try:
-        data = response.json()
-    except ValueError as exc:
-        raise UpstreamServiceError("The LLM backend returned invalid JSON.") from exc
-
-    choices = data.get("choices")
-    if not isinstance(choices, list) or not choices:
-        raise UpstreamServiceError("The LLM backend returned no completion choices.")
-
-    first_choice = choices[0]
-    if not isinstance(first_choice, dict):
-        raise UpstreamServiceError(
-            "The LLM backend returned an invalid choice payload."
+        retry_messages = list(messages)  # type: ignore[arg-type]
+        retry_messages.append(
+            {"role": "assistant", "content": None, "tool_calls": tool_calls_in_response}
         )
+        for tc in tool_calls_in_response:
+            retry_messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.get("id", ""),
+                    "content": (
+                        "No additional results are available. "
+                        "Write your response using only the previously provided information."
+                    ),
+                }
+            )
 
-    message = first_choice.get("message")
-    if not isinstance(message, dict):
-        raise UpstreamServiceError(
-            "The LLM backend returned an invalid message payload."
-        )
+        # Collect all tool names now present in the conversation
+        all_tool_names: set[str] = set()
+        for m in retry_messages:
+            for tc in m.get("tool_calls", []):
+                fn = tc.get("function", {})
+                if fn.get("name"):
+                    all_tool_names.add(fn["name"])
 
-    content = message.get("content")
-    # Some APIs return content as a list of blocks, e.g. [{"type":"text","text":"..."}]
-    if isinstance(content, list):
-        content = "".join(
-            block.get("text", "") for block in content
-            if isinstance(block, dict) and block.get("type") == "text"
-        )
-    if not isinstance(content, str) or not content.strip():
-        raise UpstreamServiceError("The LLM backend returned empty content.")
+        retry_body: dict[str, Any] = {
+            "model": model_name,
+            "messages": retry_messages,
+            "max_tokens": max_tokens,
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": "Retrieve information from the web.",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+                for name in sorted(all_tool_names)
+            ],
+            "tool_choice": "none",
+            "include_reasoning": False,
+        }
+        if response_format is not None:
+            retry_body["response_format"] = response_format
 
-    # Strip <think>...</think> reasoning blocks some models emit.
-    # Also handle orphaned tags: leading content before a lone </think>
-    # (opening tag was outside this response) or trailing <think> without close.
-    content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
-    content = re.sub(r"^.*?</think>", "", content, flags=re.DOTALL)
-    content = re.sub(r"<think>.*$", "", content, flags=re.DOTALL)
-    content = content.strip()
+        try:
+            data = await _post_completion(
+                client, f"{settings.litellm_base_url}/chat/completions", retry_body
+            )
+        except UpstreamServiceError as exc:
+            raise UpstreamServiceError(
+                str(exc).replace("backend", "backend (retry)")
+            ) from exc
+
+        _, content = _extract_message_content(data)
+        if content is None:
+            raise UpstreamServiceError(
+                "The LLM backend returned empty content even after fulfilling tool calls."
+            )
+
+    content = _strip_think_tags(content)
     if not content:
         raise UpstreamServiceError("The LLM backend returned empty content.")
 

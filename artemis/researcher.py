@@ -20,7 +20,12 @@ from artemis.config import (
 )
 from artemis.errors import UpstreamServiceError
 from artemis.extractor import enrich_results
-from artemis.llm import build_tool_messages, chat_completion, sanitize_content
+from artemis.llm import (
+    agentic_chat_completion,
+    build_tool_messages,
+    chat_completion,
+    sanitize_content,
+)
 from artemis.models import DeepResearchRun, SearchResult, TokenUsage
 from artemis.searcher import search_searxng
 
@@ -298,7 +303,9 @@ async def synthesize_essay_with_outline(
     section_results: dict[str, list[SearchResult]],
     max_tokens: int,
     content_map: dict[str, str] | None = None,
-) -> tuple[str, TokenUsage]:
+    synthesis_tool_rounds: int = 0,
+    results_per_query: int = 5,
+) -> tuple[str, TokenUsage, int]:
     """Synthesize research into essay following the outline structure."""
     settings = get_settings()
     
@@ -337,9 +344,27 @@ Make it as long as necessary to cover all the information gathered."""
         tool_content=sections_block,
     )
 
-    completion = await chat_completion(messages=messages, model=settings.summary_model, max_tokens=max_tokens)
+    if synthesis_tool_rounds > 0:
+        async def _web_search(query: str) -> str:
+            results = await search_searxng(query=query, max_results=results_per_query)
+            return format_results_for_synthesis(results)
+
+        completion = await agentic_chat_completion(
+            messages=messages,
+            model=settings.summary_model,
+            max_tokens=max_tokens,
+            tool_handlers={"web_search": _web_search},
+            max_tool_rounds=synthesis_tool_rounds,
+        )
+        extra_searches = completion.get("tool_calls_made", 0)
+    else:
+        completion = await chat_completion(
+            messages=messages, model=settings.summary_model, max_tokens=max_tokens
+        )
+        extra_searches = 0
+
     usage = TokenUsage.model_validate(completion["usage"] or {})
-    return completion["content"], usage
+    return completion["content"], usage, extra_searches
 
 
 
@@ -674,14 +699,17 @@ async def deep_research(
             )
 
     # Step 4: Synthesize with outline
-    essay, usage = await synthesize_essay_with_outline(
+    essay, usage, extra_searches = await synthesize_essay_with_outline(
         topic=query,
         outline=outline,
         section_results=final_section_results,
         max_tokens=max_tokens,
         content_map=content_map or None,
+        synthesis_tool_rounds=settings.synthesis_tool_rounds,
+        results_per_query=results_per_query,
     )
     _merge_usage(total_usage, usage.model_dump())
+    total_search_requests += extra_searches
 
     # Estimate citation tokens from search content fed to the LLM
     citation_chars = 0
