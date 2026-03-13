@@ -312,11 +312,41 @@ async def _post_completion(
         raise UpstreamServiceError("The LLM backend returned invalid JSON.") from exc
 
 
-def _strip_think_tags(content: str) -> str:
-    """Strip <think>…</think> reasoning blocks and orphaned tags."""
+def _strip_llm_artifacts(content: str) -> str:
+    """Strip non-content artifacts that models sometimes emit as plain text.
+
+    Handles:
+    - ``<think>…</think>`` reasoning blocks (and orphaned open/close tags)
+    - Text-based tool-call blocks that some models emit instead of using the
+      structured ``tool_calls`` response field, e.g.::
+
+          <minimax:tool_call>…</minimax:tool_call>
+          <tool_call>…</tool_call>
+          <|tool_call|>…<|/tool_call|>
+
+    Returns the cleaned string (may be empty).
+    """
+    # Think / reasoning blocks (including orphaned tags)
     content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
     content = re.sub(r"^.*?</think>", "", content, flags=re.DOTALL)
     content = re.sub(r"<think>.*$", "", content, flags=re.DOTALL)
+
+    # Text-based tool calls: <prefix:tool_call>…</prefix:tool_call> and
+    # <tool_call>…</tool_call> with optional pipe delimiters
+    content = re.sub(
+        r"<\|?[\w:]*tool_call\|?>.*?<\|?/[\w:]*tool_call\|?>",
+        "",
+        content,
+        flags=re.DOTALL,
+    )
+    # Orphaned opening tag at the end (model hit token limit mid-call)
+    content = re.sub(
+        r"<\|?[\w:]*tool_call\|?>.*$",
+        "",
+        content,
+        flags=re.DOTALL,
+    )
+
     return content.strip()
 
 
@@ -438,7 +468,7 @@ async def agentic_chat_completion(
         message, content = _extract_message_content(data)
 
         if content is not None:
-            content = _strip_think_tags(content)
+            content = _strip_llm_artifacts(content)
             if content:
                 return {
                     "content": content,
@@ -661,7 +691,7 @@ async def chat_completion(
                 "The LLM backend returned empty content even after fulfilling tool calls."
             )
 
-    content = _strip_think_tags(content)
+    content = _strip_llm_artifacts(content)
     if not content:
         raise UpstreamServiceError("The LLM backend returned empty content.")
 
