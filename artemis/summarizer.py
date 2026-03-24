@@ -4,15 +4,16 @@ This module provides LLM-powered summarization of search results. Given a
 search query and a list of results, it uses an LLM to generate a concise
 summary that addresses the user's information needs.
 
-Search result content (titles, URLs, snippets) is delivered to the LLM via
-tool-call messages so that untrusted web content is treated as data rather
-than instructions, mitigating prompt injection risks.
+Search result content (titles, URLs, snippets) is delivered to the LLM
+inside ``<search_results>`` tags with system-level framing that instructs the
+model to treat it as retrieved data rather than instructions, mitigating
+prompt injection risks.  Content is sanitised via :func:`sanitize_content`.
 """
 
 from typing import Any
 
 from artemis.models import SearchResult
-from artemis.llm import build_tool_messages, chat_completion, sanitize_content
+from artemis.llm import build_context_messages, chat_completion, sanitize_content
 
 
 async def summarize_results(
@@ -67,10 +68,10 @@ async def summarize_results(
         "4. Is informative and comprehensive but concise"
     )
 
-    messages = build_tool_messages(
+    messages = build_context_messages(
         system=system,
         user=query,
-        tool_content=tool_content,
+        context=tool_content,
     )
 
     completion = await chat_completion(

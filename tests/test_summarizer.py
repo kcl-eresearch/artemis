@@ -30,16 +30,16 @@ class SummarizeResultsTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(output["usage"]["total_tokens"], 80)
         mock_llm.assert_awaited_once()
 
-        # Verify messages structure: system, user, assistant (tool_call), tool
+        # Verify messages structure: system, user (with search_results)
         messages = mock_llm.call_args[1]["messages"]
+        self.assertEqual(len(messages), 2)
         self.assertEqual(messages[0]["role"], "system")
         self.assertEqual(messages[1]["role"], "user")
-        self.assertEqual(messages[1]["content"], "test query")
-        self.assertEqual(messages[2]["role"], "assistant")
-        self.assertEqual(messages[3]["role"], "tool")
-        # Tool content should include result data
-        self.assertIn("Result 1", messages[3]["content"])
-        self.assertIn("Snippet 2", messages[3]["content"])
+        self.assertIn("test query", messages[1]["content"])
+        self.assertIn("<search_results>", messages[1]["content"])
+        # Search results content should include result data
+        self.assertIn("Result 1", messages[1]["content"])
+        self.assertIn("Snippet 2", messages[1]["content"])
 
     @patch("artemis.summarizer.chat_completion", new_callable=AsyncMock)
     async def test_passes_model_and_max_tokens(self, mock_llm: AsyncMock) -> None:

@@ -22,6 +22,7 @@ from artemis.errors import UpstreamServiceError
 from artemis.extractor import enrich_results
 from artemis.llm import (
     agentic_chat_completion,
+    build_context_messages,
     build_tool_messages,
     chat_completion,
     sanitize_content,
@@ -338,13 +339,15 @@ Make it as long as necessary to cover all the information gathered."""
 
     user = f"Topic: {topic}\n\nReport Outline:\n{outline_str}"
 
-    messages = build_tool_messages(
-        system=system,
-        user=user,
-        tool_content=sections_block,
-    )
-
     if synthesis_tool_rounds > 0:
+        # Agentic mode: use tool-call message structure so the model sees
+        # pre-loaded results as tool output and can make additional calls.
+        messages = build_tool_messages(
+            system=system,
+            user=user,
+            tool_content=sections_block,
+        )
+
         async def _web_search(query: str) -> str:
             results = await search_searxng(query=query, max_results=results_per_query)
             return format_results_for_synthesis(results)
@@ -358,6 +361,13 @@ Make it as long as necessary to cover all the information gathered."""
         )
         extra_searches = completion.get("tool_calls_made", 0)
     else:
+        # Non-agentic: use plain context messages to avoid priming the
+        # model with a tool-call pattern that can cause spurious output.
+        messages = build_context_messages(
+            system=system,
+            user=user,
+            context=sections_block,
+        )
         completion = await chat_completion(
             messages=messages, model=settings.summary_model, max_tokens=max_tokens
         )
