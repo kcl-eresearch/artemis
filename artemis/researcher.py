@@ -19,7 +19,7 @@ from artemis.config import (
     get_settings,
 )
 from artemis.errors import UpstreamServiceError
-from artemis.extractor import enrich_results
+from artemis.extractor import enrich_results, fetch_and_extract
 from artemis.llm import (
     agentic_chat_completion,
     build_context_messages,
@@ -831,15 +831,432 @@ def filter_results_by_relevance_sync(
     """Simple keyword-based relevance filtering (sync version)."""
     if not results:
         return []
-    
+
     keyword_set = set(k.lower() for k in keywords)
-    
+
     scored_results = []
     for result in results:
         text = (result.title + " " + (result.snippet or "")).lower()
         matches = sum(1 for kw in keyword_set if kw in text)
         if matches >= min_matches:
             scored_results.append((result, matches))
-    
+
     scored_results.sort(key=lambda x: (-x[1], results.index(x[0])))
     return [r for r, _ in scored_results[:max_results]]
+
+
+# ---------------------------------------------------------------------------
+# Hierarchical Supervisor-Researcher Architecture
+# ---------------------------------------------------------------------------
+
+# Tool definitions for researcher agents
+_RESEARCHER_TOOL_DEFINITIONS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "Search the web for information. Returns titles, URLs, and "
+                "snippets for each result."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query string",
+                    }
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_page",
+            "description": (
+                "Fetch and extract the main text content of a web page. "
+                "Use this to read a promising search result in full."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "URL of the page to read",
+                    }
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "note",
+            "description": (
+                "Record a private reflection or note about your research "
+                "progress. Use this to reason about what you've found, "
+                "what's missing, and whether you should keep searching or "
+                "stop. This is not shown to the user."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "thought": {
+                        "type": "string",
+                        "description": "Your reflection or reasoning",
+                    }
+                },
+                "required": ["thought"],
+            },
+        },
+    },
+]
+
+
+async def _run_researcher(
+    topic: str,
+    section: str,
+    description: str,
+    results_per_query: int,
+    max_tool_rounds: int,
+    content_max_chars: int,
+    progress_callback: Callable[[str, str], None] | None = None,
+) -> dict:
+    """Run a single autonomous researcher agent for one outline section.
+
+    The researcher has access to web_search, read_page, and note tools.
+    It decides autonomously how many searches to run, which pages to read,
+    and when it has gathered enough information. It returns a written
+    summary of its findings.
+
+    Returns:
+        Dictionary with:
+        - "findings": str — the researcher's written findings
+        - "results": list[SearchResult] — all search results encountered
+        - "queries": list[str] — all search queries made
+        - "content_map": dict[str, str] — URL → extracted content
+        - "usage": dict — token usage
+    """
+    settings = get_settings()
+
+    all_results: list[SearchResult] = []
+    all_queries: list[str] = []
+    content_map: dict[str, str] = {}
+    search_count = 0
+
+    def _progress(msg: str) -> None:
+        if progress_callback:
+            progress_callback("researcher", f"[{section}] {msg}")
+
+    # Tool handlers
+    async def _web_search(query: str) -> str:
+        nonlocal search_count
+        search_count += 1
+        _progress(f"Searching: {query}")
+        results = await search_searxng(query=query, max_results=results_per_query)
+        all_results.extend(results)
+        all_queries.append(query)
+        if not results:
+            return "No results found."
+        parts = []
+        for i, r in enumerate(results):
+            title = sanitize_content(r.title, max_length=200)
+            snippet = sanitize_content(r.snippet, max_length=500)
+            parts.append(f"{i}. {title}\n   URL: {r.url}\n   {snippet}")
+        return "\n\n".join(parts)
+
+    async def _read_page(url: str) -> str:
+        _progress(f"Reading: {url}")
+        content = await fetch_and_extract(
+            url, max_chars=content_max_chars
+        )
+        if content:
+            content_map[url] = content
+            return sanitize_content(content)
+        return "Failed to extract content from this page."
+
+    async def _note(thought: str) -> str:
+        logger.debug("Researcher [%s] note: %s", section, thought[:200])
+        return "Noted."
+
+    system = f"""You are an autonomous research agent assigned to investigate one section of a larger research report.
+
+Your assignment:
+- Overall topic: {topic}
+- Your section: {section}
+- Section description: {description}
+
+You have three tools:
+1. web_search — search the web for information
+2. read_page — read the full content of a promising URL from search results
+3. note — record your thoughts about what you've found and what's missing
+
+Research strategy:
+- Start with 2-3 broad searches, then refine based on what you find
+- Read the most promising pages in full (2-4 pages)
+- Use note to reflect after each round: What did you learn? What's missing? Should you stop?
+- Stop when you have 3+ relevant sources with substantive information, or when further searches return similar information
+- Prefer authoritative and recent sources
+
+When you have gathered enough information, write a detailed summary of your findings for this section.
+Include specific facts, data points, and quotes where relevant.
+Cite sources by URL inline, e.g. [URL].
+Your final response should be ONLY your written findings — no tool calls."""
+
+    messages: list[dict] = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": f"Research the following section thoroughly: {section} — {description}"},
+    ]
+
+    tool_handlers = {
+        "web_search": _web_search,
+        "read_page": _read_page,
+        "note": _note,
+    }
+
+    try:
+        completion = await agentic_chat_completion(
+            messages=messages,
+            model=settings.summary_model,
+            max_tokens=settings.deep_research_max_tokens,
+            tool_handlers=tool_handlers,
+            tool_definitions=_RESEARCHER_TOOL_DEFINITIONS,
+            max_tool_rounds=max_tool_rounds,
+        )
+    except UpstreamServiceError as exc:
+        logger.warning("Researcher [%s] failed: %s", section, exc)
+        # Fall back to a basic summary from any results we gathered
+        if all_results:
+            completion = {
+                "content": format_results_for_synthesis(
+                    _deduplicate_results(all_results), content_map=content_map
+                ),
+                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                "tool_calls_made": search_count,
+            }
+        else:
+            completion = {
+                "content": f"Research on '{section}' could not be completed.",
+                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                "tool_calls_made": 0,
+            }
+
+    _progress(f"Done — {search_count} searches, {len(content_map)} pages read")
+
+    return {
+        "findings": completion["content"],
+        "results": _deduplicate_results(all_results),
+        "queries": all_queries,
+        "content_map": content_map,
+        "usage": completion["usage"],
+        "search_count": search_count,
+    }
+
+
+async def supervised_deep_research(
+    query: str,
+    stages: int | None = None,
+    results_per_query: int | None = None,
+    max_tokens: int | None = None,
+    outline: list[dict[str, str]] | None = None,
+    content_max_chars: int | None = None,
+    progress_callback: Callable[[str, str], None] | None = None,
+) -> DeepResearchRun:
+    """Execute deep research using hierarchical supervisor-researcher architecture.
+
+    The supervisor decomposes the research topic into sections (outline),
+    then spawns parallel researcher agents. Each researcher has its own
+    tool-calling loop with web_search, read_page, and note tools,
+    autonomously deciding what to search and when to stop.
+
+    After all researchers complete, their findings are synthesized into
+    a final essay.
+
+    Args:
+        query: The research topic or question
+        stages: Number of sections in outline (default from config)
+        results_per_query: Results per search (default from config)
+        max_tokens: Max tokens for final essay (default from config)
+        outline: Optional custom outline
+        content_max_chars: Max chars for page extraction (default from config)
+        progress_callback: Optional callback for progress updates
+    """
+    settings = get_settings()
+    stages = settings.deep_research_stages if stages is None else stages
+    results_per_query = (
+        settings.deep_research_results_per_query
+        if results_per_query is None
+        else results_per_query
+    )
+    max_tokens = settings.deep_research_max_tokens if max_tokens is None else max_tokens
+    content_max_chars = (
+        settings.deep_research_content_max_chars
+        if content_max_chars is None
+        else content_max_chars
+    )
+    max_tool_rounds = settings.researcher_max_tool_rounds
+
+    total_usage = TokenUsage()
+    total_search_requests = 0
+
+    def _progress(stage: str, message: str) -> None:
+        if progress_callback:
+            progress_callback(stage, message)
+
+    _progress("start", f"Starting supervised research on: {query}")
+
+    # Step 1: Generate or validate outline (same as flat pipeline)
+    if outline:
+        validated_outline = []
+        for item in outline:
+            if isinstance(item, dict) and "section" in item:
+                section = str(item["section"]).strip()[:_MAX_OUTLINE_SECTION_LEN]
+                description = str(item.get("description", "")).strip()[:_MAX_OUTLINE_DESCRIPTION_LEN]
+                if section:
+                    validated_outline.append({"section": section, "description": description})
+        if validated_outline:
+            outline = validated_outline
+        else:
+            outline = None
+
+    if not outline:
+        try:
+            outline, usage = await generate_outline(query, num_sections=stages)
+            _merge_usage(total_usage, usage.model_dump())
+        except Exception as exc:
+            logger.warning("Outline generation failed, using fallback: %s", exc)
+            outline = [
+                {"section": f"Section {i + 1}", "description": f"Research aspect {i + 1} of {query}"}
+                for i in range(stages)
+            ]
+
+    _progress("outline", f"Research outline ready: {len(outline)} sections")
+
+    # Step 2: Spawn parallel researcher agents
+    _progress("researchers", f"Dispatching {len(outline)} researcher agents")
+
+    researcher_tasks = []
+    for item in outline:
+        task = _run_researcher(
+            topic=query,
+            section=item["section"],
+            description=item["description"],
+            results_per_query=results_per_query,
+            max_tool_rounds=max_tool_rounds,
+            content_max_chars=content_max_chars,
+            progress_callback=progress_callback,
+        )
+        researcher_tasks.append(task)
+
+    researcher_outputs = await asyncio.gather(
+        *researcher_tasks, return_exceptions=True
+    )
+
+    # Step 3: Collect results from all researchers
+    all_results: list[SearchResult] = []
+    all_queries: list[str] = []
+    combined_content_map: dict[str, str] = {}
+    researcher_findings: dict[str, str] = {}
+
+    for item, output in zip(outline, researcher_outputs):
+        section = item["section"]
+        if isinstance(output, Exception):
+            logger.warning("Researcher [%s] failed: %s", section, output)
+            researcher_findings[section] = f"Research on '{section}' could not be completed."
+            continue
+
+        researcher_findings[section] = output["findings"]
+        all_results.extend(output["results"])
+        all_queries.extend(output["queries"])
+        combined_content_map.update(output["content_map"])
+        _merge_usage(total_usage, output["usage"])
+        total_search_requests += output["search_count"]
+
+    unique_results = _deduplicate_results(all_results)
+    unique_urls = list(set(r.url for r in unique_results if r.url))
+    urls_msg = f"Found {len(unique_urls)} unique URLs: " + ", ".join(unique_urls[:5])
+    if len(unique_urls) > 5:
+        urls_msg += f"... (+{len(unique_urls) - 5} more)"
+    _progress("search", urls_msg)
+
+    # Step 4: Synthesize essay from researcher findings
+    _progress("synthesis", "Synthesizing final essay from researcher findings")
+
+    findings_block = "\n\n".join(
+        f"## Section: {item['section']}\nDescription: {item['description']}\n"
+        f"Researcher Findings:\n{researcher_findings.get(item['section'], 'No findings.')}"
+        for item in outline
+    )
+    outline_str = "\n".join(
+        f"- {item['section']}: {item['description']}" for item in outline
+    )
+
+    system = """You are a research synthesis specialist. Write a comprehensive, well-structured research report from the findings gathered by multiple research agents.
+
+Write a thorough research report that:
+1. Has a clear introduction explaining the topic
+2. Follows the outline structure with dedicated sections
+3. Synthesizes and integrates the findings from each researcher
+4. Uses inline citations like [1], [2], etc. referencing the URLs
+5. Has substantive content in each section
+6. Ends with a conclusion summarizing key findings
+7. Notes any conflicting information or disagreements between sources
+
+The report should be detailed and comprehensive.
+Make it as long as necessary to cover all the information gathered."""
+
+    user = f"Topic: {query}\n\nReport Outline:\n{outline_str}"
+
+    if settings.synthesis_tool_rounds > 0:
+        messages = build_tool_messages(
+            system=system,
+            user=user,
+            tool_content=findings_block,
+        )
+
+        async def _web_search(query: str) -> str:
+            results = await search_searxng(query=query, max_results=results_per_query)
+            return format_results_for_synthesis(results)
+
+        completion = await agentic_chat_completion(
+            messages=messages,
+            model=settings.summary_model,
+            max_tokens=max_tokens,
+            tool_handlers={"web_search": _web_search},
+            max_tool_rounds=settings.synthesis_tool_rounds,
+        )
+        extra_searches = completion.get("tool_calls_made", 0)
+    else:
+        messages = build_context_messages(
+            system=system,
+            user=user,
+            context=findings_block,
+        )
+        completion = await chat_completion(
+            messages=messages, model=settings.summary_model, max_tokens=max_tokens
+        )
+        extra_searches = 0
+
+    essay = completion["content"]
+    _merge_usage(total_usage, completion["usage"])
+    total_search_requests += extra_searches
+
+    # Estimate citation tokens
+    citation_chars = len(findings_block)
+    total_usage.citation_tokens = citation_chars // 4 if citation_chars else 0
+    total_usage.search_requests = total_search_requests
+
+    _progress(
+        "complete",
+        f"Research complete! Generated {len(essay)} char essay from {len(unique_results)} sources",
+    )
+    return DeepResearchRun(
+        essay=essay,
+        results=unique_results,
+        sub_queries=all_queries,
+        stages_completed=len(outline),
+        usage=total_usage,
+    )

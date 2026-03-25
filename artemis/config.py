@@ -290,6 +290,10 @@ class Settings:
         playwright_max_html_bytes: Maximum HTML bytes to extract per page
         synthesis_tool_rounds: Max rounds of live web_search tool calls during synthesis
             (0 = disabled; model writes from pre-loaded results only)
+        supervised_research: Use hierarchical supervisor-researcher architecture for deep research.
+            When enabled, each outline section is researched by an autonomous agent with its own
+            tool-calling loop (web_search, read_page, note) instead of the flat pipeline.
+        researcher_max_tool_rounds: Max tool-call rounds per researcher agent in supervised mode.
     """
 
     searxng_api_base: str
@@ -329,6 +333,8 @@ class Settings:
     playwright_context_recycle_pages: int
     playwright_max_html_bytes: int
     synthesis_tool_rounds: int
+    supervised_research: bool
+    researcher_max_tool_rounds: int
 
 
 @lru_cache(maxsize=1)
@@ -442,6 +448,10 @@ def get_settings() -> Settings:
         ),
         synthesis_tool_rounds=_parse_int(
             "SYNTHESIS_TOOL_ROUNDS", 0, minimum=0, maximum=10
+        ),
+        supervised_research=_parse_bool("SUPERVISED_RESEARCH", False),
+        researcher_max_tool_rounds=_parse_int(
+            "RESEARCHER_MAX_TOOL_ROUNDS", 15, minimum=1, maximum=50
         ),
     )
 

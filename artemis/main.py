@@ -20,7 +20,7 @@ import logging
 import secrets
 import time
 import uuid
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 
 import httpx
@@ -49,7 +49,7 @@ from artemis.models import (
     SearchResultsBlock,
     TokenUsage,
 )
-from artemis.researcher import deep_research, generate_outline
+from artemis.researcher import deep_research, generate_outline, supervised_deep_research
 from artemis.searcher import search_searxng
 from artemis.searcher import close_client as close_searxng_client
 from artemis.summarizer import summarize_results
@@ -354,6 +354,44 @@ def _record_summary_failure() -> list[str]:
 
 
 
+def _create_research_task(
+    request: ResponsesRequest,
+    settings: Settings,
+    preset_config: ResearchPresetConfig,
+    progress_callback: Callable | None = None,
+) -> asyncio.Task:
+    """Create the appropriate research task based on config.
+
+    Uses supervised_deep_research when SUPERVISED_RESEARCH is enabled,
+    otherwise falls back to the flat deep_research pipeline.
+    """
+    if settings.supervised_research:
+        coro = supervised_deep_research(
+            request.input,
+            stages=request.max_steps or preset_config.stages,
+            results_per_query=preset_config.results_per_query,
+            max_tokens=preset_config.max_tokens,
+            outline=request.outline,
+            content_max_chars=preset_config.content_max_chars,
+            progress_callback=progress_callback,
+        )
+    else:
+        coro = deep_research(
+            request.input,
+            stages=request.max_steps or preset_config.stages,
+            passes=preset_config.passes,
+            sub_queries_per_stage=preset_config.subqueries,
+            results_per_query=preset_config.results_per_query,
+            max_tokens=preset_config.max_tokens,
+            outline=request.outline,
+            content_extraction=preset_config.content_extraction,
+            pages_per_section=preset_config.pages_per_section,
+            content_max_chars=preset_config.content_max_chars,
+            progress_callback=progress_callback,
+        )
+    return asyncio.create_task(coro)
+
+
 async def _stream_responses(request: ResponsesRequest) -> StreamingResponse:
     """Stream response as plain text - thinking + final output.
 
@@ -387,19 +425,9 @@ async def _stream_responses(request: ResponsesRequest) -> StreamingResponse:
                 def progress_cb(stage: str, msg: str):
                     queue.put_nowait(f"[{stage.upper()}] {msg}")
 
-                research_task = asyncio.create_task(deep_research(
-                    request.input,
-                    stages=request.max_steps or preset_config.stages,
-                    passes=preset_config.passes,
-                    sub_queries_per_stage=preset_config.subqueries,
-                    results_per_query=preset_config.results_per_query,
-                    max_tokens=preset_config.max_tokens,
-                    outline=request.outline,
-                    content_extraction=preset_config.content_extraction,
-                    pages_per_section=preset_config.pages_per_section,
-                    content_max_chars=preset_config.content_max_chars,
-                    progress_callback=progress_cb,
-                ))
+                research_task = _create_research_task(
+                    request, settings, preset_config, progress_callback=progress_cb,
+                )
 
                 # Yield progress events as they arrive
                 while not research_task.done():
@@ -625,18 +653,7 @@ async def responses(
     if request.preset in {"deep-research", "shallow-research"}:
         settings = get_settings()
         preset_config = _research_preset_config(settings, request.preset)
-        research_task = asyncio.create_task(deep_research(
-            request.input,
-            stages=request.max_steps or preset_config.stages,
-            passes=preset_config.passes,
-            sub_queries_per_stage=preset_config.subqueries,
-            results_per_query=preset_config.results_per_query,
-            max_tokens=preset_config.max_tokens,
-            outline=request.outline,
-            content_extraction=preset_config.content_extraction,
-            pages_per_section=preset_config.pages_per_section,
-            content_max_chars=preset_config.content_max_chars,
-        ))
+        research_task = _create_research_task(request, settings, preset_config)
         try:
             while not research_task.done():
                 if await http_request.is_disconnected():

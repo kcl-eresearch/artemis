@@ -70,6 +70,8 @@ class APITestCase(unittest.TestCase):
                 playwright_context_recycle_pages=50,
                 playwright_max_html_bytes=5242880,
                 synthesis_tool_rounds=0,
+                supervised_research=False,
+                researcher_max_tool_rounds=15,
             ),
         ):
             unauthorized = self.client.post("/search", json={"query": "fastapi"})
@@ -138,6 +140,8 @@ class APITestCase(unittest.TestCase):
             playwright_context_recycle_pages=50,
             playwright_max_html_bytes=5242880,
             synthesis_tool_rounds=0,
+            supervised_research=False,
+            researcher_max_tool_rounds=15,
         )
 
         with patch("artemis.main.get_settings", return_value=settings):
@@ -158,6 +162,7 @@ class APITestCase(unittest.TestCase):
             content_extraction=True,
             pages_per_section=3,
             content_max_chars=3000,
+            progress_callback=None,
         )
         self.assertEqual(response.json()["usage"]["total_tokens"], 30)
 
@@ -213,6 +218,8 @@ class APITestCase(unittest.TestCase):
                 playwright_context_recycle_pages=50,
                 playwright_max_html_bytes=5242880,
                 synthesis_tool_rounds=0,
+                supervised_research=False,
+                researcher_max_tool_rounds=15,
             ),
         ):
             response = self.client.post(
@@ -232,6 +239,7 @@ class APITestCase(unittest.TestCase):
             content_extraction=False,
             pages_per_section=2,
             content_max_chars=1500,
+            progress_callback=None,
         )
         self.assertEqual(response.json()["model"], "artemis-shallow-research")
 

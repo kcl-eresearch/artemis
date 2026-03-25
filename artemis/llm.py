@@ -405,6 +405,7 @@ async def agentic_chat_completion(
     model: str,
     max_tokens: int,
     tool_handlers: dict[str, Any],
+    tool_definitions: list[dict[str, Any]] | None = None,
     max_tool_rounds: int = 5,
     response_format: dict[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -425,6 +426,11 @@ async def agentic_chat_completion(
         tool_handlers: Mapping of tool name → async callable.  Each callable
             receives keyword arguments extracted from the model's tool-call
             arguments JSON and must return a ``str`` result.
+        tool_definitions: Optional list of OpenAI-format tool definitions.
+            When provided, these are used instead of auto-generating schemas
+            from handler names.  Each entry should be a dict with ``type``
+            and ``function`` keys.  Handler names not covered by a definition
+            get a default web_search-style schema.
         max_tool_rounds: Maximum number of tool-call rounds before forcing a
             text response with ``tool_choice="none"``.
         response_format: Optional response format hint.
@@ -440,6 +446,14 @@ async def agentic_chat_completion(
     client = _get_client()
     url = f"{settings.litellm_base_url}/chat/completions"
 
+    # Build tool definitions lookup from caller-provided definitions
+    provided_defs: dict[str, dict[str, Any]] = {}
+    if tool_definitions:
+        for td in tool_definitions:
+            fn = td.get("function", {})
+            if fn.get("name"):
+                provided_defs[fn["name"]] = td
+
     # Collect all tool names: ones we can execute + historical ones already in messages
     active_names: set[str] = set(tool_handlers.keys())
     history_names: set[str] = set()
@@ -451,7 +465,10 @@ async def agentic_chat_completion(
 
     tools: list[dict[str, Any]] = []
     for name in sorted(active_names | history_names):
-        if name in active_names:
+        if name in provided_defs:
+            # Use caller-provided definition
+            tools.append(provided_defs[name])
+        elif name in active_names:
             tools.append(
                 {
                     "type": "function",
