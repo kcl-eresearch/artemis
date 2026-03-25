@@ -464,6 +464,9 @@ class SemanticSearchCacheTestCase(unittest.IsolatedAsyncioTestCase):
             supervised_research=False,
             researcher_max_tool_rounds=15,
             research_brief_enabled=True,
+            progressive_summarization=True,
+            progressive_summary_max_chars=800,
+            progressive_summary_max_tokens=500,
         )
         mock_settings.return_value = settings
 
@@ -542,6 +545,9 @@ class SemanticSearchCacheTestCase(unittest.IsolatedAsyncioTestCase):
             supervised_research=False,
             researcher_max_tool_rounds=15,
             research_brief_enabled=True,
+            progressive_summarization=True,
+            progressive_summary_max_chars=800,
+            progressive_summary_max_tokens=500,
         )
         mock_settings.return_value = settings
 
@@ -614,6 +620,9 @@ class SemanticSearchCacheTestCase(unittest.IsolatedAsyncioTestCase):
             supervised_research=False,
             researcher_max_tool_rounds=15,
             research_brief_enabled=True,
+            progressive_summarization=True,
+            progressive_summary_max_chars=800,
+            progressive_summary_max_tokens=500,
         )
         mock_settings.return_value = settings
 
