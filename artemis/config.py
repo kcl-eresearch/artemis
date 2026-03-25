@@ -475,7 +475,7 @@ def get_settings() -> Settings:
             "PROGRESSIVE_SUMMARY_MAX_CHARS", 800, minimum=200, maximum=5000
         ),
         progressive_summary_max_tokens=_parse_int(
-            "PROGRESSIVE_SUMMARY_MAX_TOKENS", 500, minimum=100, maximum=2000
+            "PROGRESSIVE_SUMMARY_MAX_TOKENS", 500, minimum=100, maximum=8192
         ),
         researcher_min_relevant_sources=_parse_int(
             "RESEARCHER_MIN_RELEVANT_SOURCES", 3, minimum=1, maximum=20
