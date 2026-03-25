@@ -216,6 +216,13 @@ class GenerateSubqueriesTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("old query 1", user_msg)
 
 
+# Standard mock response for generate_research_brief (prepend to side_effect lists)
+_BRIEF_RESPONSE = {
+    "content": '{"research_question": "test topic", "scope": "", "search_guidance": ""}',
+    "usage": {"input_tokens": 5, "output_tokens": 5, "total_tokens": 10},
+}
+
+
 class DeepResearchOrchestrationTestCase(unittest.IsolatedAsyncioTestCase):
     """Test the deep_research function with all dependencies mocked."""
 
@@ -237,8 +244,8 @@ class DeepResearchOrchestrationTestCase(unittest.IsolatedAsyncioTestCase):
         mock_select: AsyncMock,
         mock_enrich: AsyncMock,
     ) -> None:
-        # Outline generation
         mock_llm.side_effect = [
+            _BRIEF_RESPONSE,
             # generate_outline
             {"content": '[{"section": "Overview", "description": "Topic overview"}]',
              "usage": {"input_tokens": 30, "output_tokens": 20, "total_tokens": 50}},
@@ -276,6 +283,7 @@ class DeepResearchOrchestrationTestCase(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         custom_outline = [{"section": "Custom", "description": "Custom section"}]
         mock_llm.side_effect = [
+            _BRIEF_RESPONSE,
             # generate_subqueries_for_section (no outline generation needed)
             {"content": '["query 1"]',
              "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}},
@@ -290,8 +298,8 @@ class DeepResearchOrchestrationTestCase(unittest.IsolatedAsyncioTestCase):
         result = await deep_research("test", stages=1, passes=1, outline=custom_outline)
 
         self.assertEqual(result.essay, "Custom essay.")
-        # LLM should have been called twice (subqueries + synthesis), not 3 times
-        self.assertEqual(mock_llm.call_count, 2)
+        # LLM called 3 times: brief + subqueries + synthesis (no outline)
+        self.assertEqual(mock_llm.call_count, 3)
 
     @patch("artemis.researcher.enrich_results", new_callable=AsyncMock)
     @patch("artemis.researcher.select_relevant_results", new_callable=AsyncMock)
@@ -305,6 +313,7 @@ class DeepResearchOrchestrationTestCase(unittest.IsolatedAsyncioTestCase):
         mock_enrich: AsyncMock,
     ) -> None:
         mock_llm.side_effect = [
+            _BRIEF_RESPONSE,
             {"content": '[{"section": "S1", "description": "D1"}]',
              "usage": {"input_tokens": 10, "output_tokens": 10, "total_tokens": 20}},
             {"content": '["q1"]',
@@ -346,9 +355,12 @@ class DeepResearchOrchestrationTestCase(unittest.IsolatedAsyncioTestCase):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
+                # Research brief
+                return _BRIEF_RESPONSE
+            elif call_count == 2:
                 # Outline generation fails
                 raise UpstreamServiceError("LLM down")
-            elif call_count == 2:
+            elif call_count == 3:
                 # Subqueries for fallback sections
                 return {"content": '["query"]',
                         "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}}

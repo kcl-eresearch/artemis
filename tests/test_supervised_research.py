@@ -11,6 +11,13 @@ from artemis.researcher import (
 )
 
 
+# Standard mock response for generate_research_brief (prepend to side_effect lists)
+_BRIEF_RESPONSE = {
+    "content": '{"research_question": "test topic", "scope": "", "search_guidance": ""}',
+    "usage": {"input_tokens": 5, "output_tokens": 5, "total_tokens": 10},
+}
+
+
 class ResearcherToolDefinitionsTestCase(unittest.TestCase):
     """Verify the tool definitions are well-formed."""
 
@@ -221,8 +228,10 @@ class SupervisedDeepResearchTestCase(unittest.IsolatedAsyncioTestCase):
         mock_extract: AsyncMock,
         mock_agentic: AsyncMock,
     ) -> None:
-        # chat_completion is called for: outline generation + synthesis
+        # chat_completion is called for: brief + outline generation + synthesis
         mock_llm.side_effect = [
+            # generate_research_brief
+            _BRIEF_RESPONSE,
             # generate_outline
             {
                 "content": '[{"section": "Overview", "description": "Topic overview"}]',
@@ -259,11 +268,14 @@ class SupervisedDeepResearchTestCase(unittest.IsolatedAsyncioTestCase):
         mock_agentic: AsyncMock,
     ) -> None:
         custom_outline = [{"section": "Custom", "description": "Custom section"}]
-        # Only synthesis call (no outline generation)
-        mock_llm.return_value = {
-            "content": "Custom essay.",
-            "usage": {"input_tokens": 50, "output_tokens": 100, "total_tokens": 150},
-        }
+        # brief + synthesis (no outline generation)
+        mock_llm.side_effect = [
+            _BRIEF_RESPONSE,
+            {
+                "content": "Custom essay.",
+                "usage": {"input_tokens": 50, "output_tokens": 100, "total_tokens": 150},
+            },
+        ]
         mock_agentic.return_value = {
             "content": "Researcher findings.",
             "usage": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30},
@@ -275,8 +287,8 @@ class SupervisedDeepResearchTestCase(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(result.essay, "Custom essay.")
-        # chat_completion should only be called once (synthesis), not for outline
-        self.assertEqual(mock_llm.call_count, 1)
+        # chat_completion called twice: brief + synthesis (no outline)
+        self.assertEqual(mock_llm.call_count, 2)
 
     @patch("artemis.researcher.agentic_chat_completion", new_callable=AsyncMock)
     @patch("artemis.researcher.fetch_and_extract", new_callable=AsyncMock)
@@ -290,6 +302,7 @@ class SupervisedDeepResearchTestCase(unittest.IsolatedAsyncioTestCase):
         mock_agentic: AsyncMock,
     ) -> None:
         mock_llm.side_effect = [
+            _BRIEF_RESPONSE,
             {
                 "content": '[{"section": "S1", "description": "D1"}]',
                 "usage": {"input_tokens": 10, "output_tokens": 10, "total_tokens": 20},
@@ -332,6 +345,7 @@ class SupervisedDeepResearchTestCase(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         """If a researcher fails, the pipeline continues with other sections."""
         mock_llm.side_effect = [
+            _BRIEF_RESPONSE,
             {
                 "content": '[{"section": "S1", "description": "D1"}, {"section": "S2", "description": "D2"}]',
                 "usage": {"input_tokens": 10, "output_tokens": 10, "total_tokens": 20},
@@ -369,6 +383,7 @@ class SupervisedDeepResearchTestCase(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         """Verify multiple researchers are spawned for multiple sections."""
         mock_llm.side_effect = [
+            _BRIEF_RESPONSE,
             {
                 "content": '[{"section": "S1", "description": "D1"}, {"section": "S2", "description": "D2"}, {"section": "S3", "description": "D3"}]',
                 "usage": {"input_tokens": 10, "output_tokens": 10, "total_tokens": 20},

@@ -72,6 +72,7 @@ class APITestCase(unittest.TestCase):
                 synthesis_tool_rounds=0,
                 supervised_research=False,
                 researcher_max_tool_rounds=15,
+                research_brief_enabled=True,
             ),
         ):
             unauthorized = self.client.post("/search", json={"query": "fastapi"})
@@ -142,6 +143,7 @@ class APITestCase(unittest.TestCase):
             synthesis_tool_rounds=0,
             supervised_research=False,
             researcher_max_tool_rounds=15,
+            research_brief_enabled=True,
         )
 
         with patch("artemis.main.get_settings", return_value=settings):
@@ -220,6 +222,7 @@ class APITestCase(unittest.TestCase):
                 synthesis_tool_rounds=0,
                 supervised_research=False,
                 researcher_max_tool_rounds=15,
+                research_brief_enabled=True,
             ),
         ):
             response = self.client.post(

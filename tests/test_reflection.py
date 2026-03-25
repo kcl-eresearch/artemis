@@ -12,6 +12,13 @@ from artemis.researcher import (
 )
 
 
+# Standard mock response for generate_research_brief (prepend to side_effect lists)
+_BRIEF_RESPONSE = {
+    "content": '{"research_question": "test topic", "scope": "", "search_guidance": ""}',
+    "usage": {"input_tokens": 5, "output_tokens": 5, "total_tokens": 10},
+}
+
+
 class ParseReflectionTestCase(unittest.TestCase):
     """Test parsing of the LLM reflection JSON response."""
 
@@ -178,6 +185,8 @@ class DeepResearchReflectionTestCase(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         """With passes=2, reflection should run after each pass."""
         mock_llm.side_effect = [
+            # generate_research_brief
+            _BRIEF_RESPONSE,
             # generate_outline
             {"content": '[{"section": "S1", "description": "D1"}]',
              "usage": {"input_tokens": 10, "output_tokens": 10, "total_tokens": 20}},
@@ -204,8 +213,8 @@ class DeepResearchReflectionTestCase(unittest.IsolatedAsyncioTestCase):
         result = await deep_research("test topic", stages=1, passes=2)
 
         self.assertEqual(result.essay, "Final essay.")
-        # LLM should have been called 6 times (outline + subqueries + reflect + refined + reflect + synthesis)
-        self.assertEqual(mock_llm.call_count, 6)
+        # LLM should have been called 7 times (brief + outline + subqueries + reflect + refined + reflect + synthesis)
+        self.assertEqual(mock_llm.call_count, 7)
 
     @patch("artemis.researcher.enrich_results", new_callable=AsyncMock)
     @patch("artemis.researcher.select_relevant_results", new_callable=AsyncMock)
@@ -220,6 +229,8 @@ class DeepResearchReflectionTestCase(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         """If reflection says should_continue=false, remaining passes are skipped."""
         mock_llm.side_effect = [
+            # generate_research_brief
+            _BRIEF_RESPONSE,
             # generate_outline
             {"content": '[{"section": "S1", "description": "D1"}]',
              "usage": {"input_tokens": 10, "output_tokens": 10, "total_tokens": 20}},
@@ -240,9 +251,9 @@ class DeepResearchReflectionTestCase(unittest.IsolatedAsyncioTestCase):
         result = await deep_research("test topic", stages=1, passes=3)
 
         self.assertEqual(result.essay, "Essay from early stop.")
-        # Only 4 LLM calls: outline + subqueries + reflection + synthesis
+        # Only 5 LLM calls: brief + outline + subqueries + reflection + synthesis
         # Passes 2 and 3 were skipped
-        self.assertEqual(mock_llm.call_count, 4)
+        self.assertEqual(mock_llm.call_count, 5)
 
     @patch("artemis.researcher.enrich_results", new_callable=AsyncMock)
     @patch("artemis.researcher.select_relevant_results", new_callable=AsyncMock)
@@ -257,6 +268,8 @@ class DeepResearchReflectionTestCase(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         """Gaps from reflection should appear in the refined query prompt."""
         mock_llm.side_effect = [
+            # generate_research_brief
+            _BRIEF_RESPONSE,
             # generate_outline
             {"content": '[{"section": "S1", "description": "D1"}]',
              "usage": {"input_tokens": 10, "output_tokens": 10, "total_tokens": 20}},
@@ -282,8 +295,8 @@ class DeepResearchReflectionTestCase(unittest.IsolatedAsyncioTestCase):
 
         await deep_research("test topic", stages=1, passes=2)
 
-        # The 4th LLM call is generate_refined_queries — check that gap context is in the prompt
-        refined_call = mock_llm.call_args_list[3]
+        # The 5th LLM call is generate_refined_queries (brief + outline + subqueries + reflect + refined)
+        refined_call = mock_llm.call_args_list[4]
         messages = refined_call[1]["messages"]
         user_msg = next(m["content"] for m in messages if m["role"] == "user" and "Generate" in m["content"])
         self.assertIn("missing recent 2025 data", user_msg)
@@ -303,6 +316,8 @@ class DeepResearchReflectionTestCase(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         """With passes=1, no reflection step should occur."""
         mock_llm.side_effect = [
+            # generate_research_brief
+            _BRIEF_RESPONSE,
             # generate_outline
             {"content": '[{"section": "S1", "description": "D1"}]',
              "usage": {"input_tokens": 10, "output_tokens": 10, "total_tokens": 20}},
@@ -320,8 +335,8 @@ class DeepResearchReflectionTestCase(unittest.IsolatedAsyncioTestCase):
         result = await deep_research("test topic", stages=1, passes=1)
 
         self.assertEqual(result.essay, "Single pass essay.")
-        # Only 3 LLM calls — no reflection
-        self.assertEqual(mock_llm.call_count, 3)
+        # Only 4 LLM calls: brief + outline + subqueries + synthesis — no reflection
+        self.assertEqual(mock_llm.call_count, 4)
 
     @patch("artemis.researcher.enrich_results", new_callable=AsyncMock)
     @patch("artemis.researcher.select_relevant_results", new_callable=AsyncMock)
@@ -336,6 +351,8 @@ class DeepResearchReflectionTestCase(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         """Reflection should emit progress callbacks."""
         mock_llm.side_effect = [
+            # generate_research_brief
+            _BRIEF_RESPONSE,
             # generate_outline
             {"content": '[{"section": "S1", "description": "D1"}]',
              "usage": {"input_tokens": 10, "output_tokens": 10, "total_tokens": 20}},
@@ -381,19 +398,22 @@ class DeepResearchReflectionTestCase(unittest.IsolatedAsyncioTestCase):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
+                # generate_research_brief
+                return _BRIEF_RESPONSE
+            elif call_count == 2:
                 return {"content": '[{"section": "S1", "description": "D1"}]',
                         "usage": {"input_tokens": 10, "output_tokens": 10, "total_tokens": 20}}
-            elif call_count == 2:
+            elif call_count == 3:
                 return {"content": '["query 1"]',
                         "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}}
-            elif call_count == 3:
+            elif call_count == 4:
                 # Reflection fails
                 raise UpstreamServiceError("LLM temporarily unavailable")
-            elif call_count == 4:
+            elif call_count == 5:
                 # Pass 2 refined queries (should still run because failure = continue)
                 return {"content": '["refined query"]',
                         "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}}
-            elif call_count == 5:
+            elif call_count == 6:
                 # Pass 2 reflection
                 return {"content": '{"section_assessments": {}, "should_continue": false, "focus_areas": []}',
                         "usage": {"input_tokens": 20, "output_tokens": 15, "total_tokens": 35}}

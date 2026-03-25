@@ -64,6 +64,7 @@ def _default_settings(**overrides) -> Settings:
         synthesis_tool_rounds=0,
         supervised_research=False,
         researcher_max_tool_rounds=15,
+        research_brief_enabled=True,
     )
     defaults.update(overrides)
     return Settings(**defaults)
