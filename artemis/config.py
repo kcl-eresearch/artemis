@@ -294,6 +294,16 @@ class Settings:
             When enabled, each outline section is researched by an autonomous agent with its own
             tool-calling loop (web_search, read_page, note) instead of the flat pipeline.
         researcher_max_tool_rounds: Max tool-call rounds per researcher agent in supervised mode.
+        research_brief_enabled: Generate a focused research brief from the raw user query before
+            outline generation.  Improves outline quality and downstream query specificity.
+        progressive_summarization: Summarize each search result's content independently before
+            synthesis.  Controls token budget while preserving more signal than raw snippets.
+        progressive_summary_max_chars: Max characters per individual result summary.
+        progressive_summary_max_tokens: Max LLM output tokens for each summarization call.
+        researcher_min_relevant_sources: Minimum relevant pages read before a researcher agent
+            may stop early (code-level heuristic, independent of LLM judgment).
+        researcher_overlap_threshold: URL overlap ratio (0.0–1.0) between last 2 searches
+            that triggers early stopping due to diminishing returns.
     """
 
     searxng_api_base: str
@@ -335,6 +345,12 @@ class Settings:
     synthesis_tool_rounds: int
     supervised_research: bool
     researcher_max_tool_rounds: int
+    research_brief_enabled: bool
+    progressive_summarization: bool
+    progressive_summary_max_chars: int
+    progressive_summary_max_tokens: int
+    researcher_min_relevant_sources: int
+    researcher_overlap_threshold: float
 
 
 @lru_cache(maxsize=1)
@@ -452,6 +468,20 @@ def get_settings() -> Settings:
         supervised_research=_parse_bool("SUPERVISED_RESEARCH", False),
         researcher_max_tool_rounds=_parse_int(
             "RESEARCHER_MAX_TOOL_ROUNDS", 15, minimum=1, maximum=50
+        ),
+        research_brief_enabled=_parse_bool("RESEARCH_BRIEF_ENABLED", True),
+        progressive_summarization=_parse_bool("PROGRESSIVE_SUMMARIZATION", True),
+        progressive_summary_max_chars=_parse_int(
+            "PROGRESSIVE_SUMMARY_MAX_CHARS", 800, minimum=200, maximum=5000
+        ),
+        progressive_summary_max_tokens=_parse_int(
+            "PROGRESSIVE_SUMMARY_MAX_TOKENS", 500, minimum=100, maximum=2000
+        ),
+        researcher_min_relevant_sources=_parse_int(
+            "RESEARCHER_MIN_RELEVANT_SOURCES", 3, minimum=1, maximum=20
+        ),
+        researcher_overlap_threshold=_parse_float(
+            "RESEARCHER_OVERLAP_THRESHOLD", 0.6, minimum=0.0, maximum=1.0
         ),
     )
 

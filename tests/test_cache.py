@@ -467,6 +467,8 @@ class SemanticSearchCacheTestCase(unittest.IsolatedAsyncioTestCase):
             progressive_summarization=True,
             progressive_summary_max_chars=800,
             progressive_summary_max_tokens=500,
+            researcher_min_relevant_sources=3,
+            researcher_overlap_threshold=0.6,
         )
         mock_settings.return_value = settings
 
@@ -548,6 +550,8 @@ class SemanticSearchCacheTestCase(unittest.IsolatedAsyncioTestCase):
             progressive_summarization=True,
             progressive_summary_max_chars=800,
             progressive_summary_max_tokens=500,
+            researcher_min_relevant_sources=3,
+            researcher_overlap_threshold=0.6,
         )
         mock_settings.return_value = settings
 
@@ -623,6 +627,8 @@ class SemanticSearchCacheTestCase(unittest.IsolatedAsyncioTestCase):
             progressive_summarization=True,
             progressive_summary_max_chars=800,
             progressive_summary_max_tokens=500,
+            researcher_min_relevant_sources=3,
+            researcher_overlap_threshold=0.6,
         )
         mock_settings.return_value = settings
 

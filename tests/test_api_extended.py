@@ -68,6 +68,8 @@ def _default_settings(**overrides) -> Settings:
         progressive_summarization=True,
         progressive_summary_max_chars=800,
         progressive_summary_max_tokens=500,
+        researcher_min_relevant_sources=3,
+        researcher_overlap_threshold=0.6,
     )
     defaults.update(overrides)
     return Settings(**defaults)

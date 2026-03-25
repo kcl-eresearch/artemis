@@ -22,6 +22,7 @@ import json
 import logging
 import re
 import uuid
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -408,6 +409,7 @@ async def agentic_chat_completion(
     tool_definitions: list[dict[str, Any]] | None = None,
     max_tool_rounds: int = 5,
     response_format: dict[str, str] | None = None,
+    should_stop: Callable[[], str | None] | None = None,
 ) -> dict[str, Any]:
     """Chat completion with a live tool-execution loop.
 
@@ -434,6 +436,9 @@ async def agentic_chat_completion(
         max_tool_rounds: Maximum number of tool-call rounds before forcing a
             text response with ``tool_choice="none"``.
         response_format: Optional response format hint.
+        should_stop: Optional callback checked after each round of tool calls.
+            When it returns a non-None string (stop reason), the next iteration
+            forces ``tool_choice="none"`` so the model produces its final text.
 
     Returns:
         Dictionary with:
@@ -508,10 +513,11 @@ async def agentic_chat_completion(
         "total_tokens": 0,
     }
     total_tool_calls = 0
+    force_text_next = False
 
     for round_num in range(max_tool_rounds + 1):
-        # On the last allowed round force a text response
-        tool_choice = "none" if round_num >= max_tool_rounds else "auto"
+        # On the last allowed round (or after early-stop trigger) force a text response
+        tool_choice = "none" if (round_num >= max_tool_rounds or force_text_next) else "auto"
 
         body: dict[str, Any] = {
             "model": model_name,
@@ -594,6 +600,15 @@ async def agentic_chat_completion(
                     "content": result,
                 }
             )
+
+        # Check early-stop heuristic after processing all tool results
+        if should_stop is not None and not force_text_next:
+            stop_reason = should_stop()
+            if stop_reason:
+                logger.info(
+                    "Early stop triggered (round %d): %s", round_num + 1, stop_reason,
+                )
+                force_text_next = True
 
     raise UpstreamServiceError(
         "Agentic loop exhausted without producing a text response."

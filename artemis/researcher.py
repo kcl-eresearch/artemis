@@ -165,6 +165,115 @@ def _parse_outline(raw_content: str) -> list[dict[str, str]]:
     return outline
 
 
+def _parse_research_brief(raw_content: str, original_query: str) -> str:
+    """Parse LLM research brief response into a refined topic string.
+
+    The LLM is asked to return a JSON object with ``research_question`` and
+    ``scope`` keys.  This function extracts them and builds a single string
+    that can replace the raw user query in downstream planning stages.
+
+    Falls back to the original query if parsing fails so that the pipeline
+    is never blocked by a brief-generation hiccup.
+    """
+    candidate = raw_content.strip()
+    if candidate.startswith("```"):
+        candidate = candidate.strip("`")
+        if candidate.startswith("json"):
+            candidate = candidate[4:].strip()
+
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+        if start < 0 or end <= start:
+            logger.warning("Brief parse failed, using original query")
+            return original_query
+        try:
+            parsed = json.loads(candidate[start : end + 1])
+        except json.JSONDecodeError:
+            logger.warning("Brief parse failed, using original query")
+            return original_query
+
+    if not isinstance(parsed, dict):
+        return original_query
+
+    question = parsed.get("research_question", "").strip()
+    scope = parsed.get("scope", "").strip()
+    guidance = parsed.get("search_guidance", "").strip()
+
+    if not question:
+        return original_query
+
+    parts = [question]
+    if scope:
+        parts.append(f"Scope: {scope}")
+    if guidance:
+        parts.append(f"Search guidance: {guidance}")
+    return "\n".join(parts)
+
+
+async def generate_research_brief(
+    query: str,
+) -> tuple[str, TokenUsage]:
+    """Transform a raw user query into a focused research brief.
+
+    The brief is a refined, specific research question with scope and
+    search guidance that replaces the raw query in downstream planning
+    stages (outline generation, query decomposition).  This improves
+    outline quality and downstream query specificity.
+
+    The original user query is preserved separately for essay synthesis
+    so that the final output answers what the user actually asked.
+
+    Args:
+        query: Raw user query / topic string.
+
+    Returns:
+        Tuple of (brief string, token usage).  On failure the brief
+        falls back to the original query.
+    """
+    settings = get_settings()
+
+    system = (
+        "You are a research planning specialist. Transform the user's "
+        "raw query into a precise, well-scoped research brief that will "
+        "guide a multi-stage research process."
+    )
+
+    user = f"""User query: {query}
+
+Transform this into a focused research brief. Respond with ONLY a JSON object:
+
+{{
+  "research_question": "A clear, specific research question that captures the user's intent",
+  "scope": "What should and should not be covered (time period, geography, sub-topics)",
+  "search_guidance": "What types of sources would be most valuable (e.g. official documentation for products, academic papers for scientific topics, news sources for current events, industry reports for market analysis)"
+}}
+
+Guidelines:
+- If the query is already specific, keep it focused — don't over-broaden
+- If the query is vague or conversational, sharpen it into a researchable question
+- If the query implies a comparison, make that explicit
+- Identify the most useful source types for this topic"""
+
+    try:
+        completion = await chat_completion(
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            model=settings.summary_model,
+            max_tokens=1000,
+        )
+        brief = _parse_research_brief(completion["content"], query)
+        usage = TokenUsage.model_validate(completion["usage"] or {})
+        return brief, usage
+    except UpstreamServiceError as exc:
+        logger.warning("Research brief generation failed, using original query: %s", exc)
+        return query, TokenUsage()
+
+
 async def generate_outline(topic: str, num_sections: int = 5) -> tuple[list[dict[str, str]], TokenUsage]:
     """Generate a research outline with sections to cover."""
     settings = get_settings()
@@ -461,6 +570,127 @@ async def search_and_collect(query: str, max_results: int) -> list[SearchResult]
     return await search_searxng(query=query, max_results=max_results)
 
 
+async def summarize_single_result(
+    topic: str,
+    section: str,
+    content: str,
+    url: str = "",
+    title: str = "",
+    max_chars: int = 800,
+    max_tokens: int = 500,
+) -> tuple[str, dict[str, int] | None]:
+    """Summarize a single search result's content into a concise, query-aware summary.
+
+    Distils raw page content (or snippet) down to *max_chars* while preserving
+    key excerpts, data-points, and source attribution.  On any failure the raw
+    content is returned truncated to *max_chars* so the pipeline is never blocked.
+
+    Returns:
+        Tuple of (summary_text, raw_usage_dict or None on fallback).
+    """
+    settings = get_settings()
+
+    # Not worth summarizing if already short enough.
+    if len(content) <= max_chars:
+        return content, None
+
+    system = (
+        "You are a research content summarizer. Summarize the following web page "
+        "content, focusing on information relevant to the given topic and section. "
+        "Preserve key excerpts (quote them directly), specific data points, "
+        "statistics, and dates. Keep your summary under "
+        f"{max_chars} characters."
+    )
+    source_line = f"Source: {title} — {url}" if url else f"Source: {title}"
+    user = (
+        f"Research topic: {topic}\n"
+        f"Section: {section}\n"
+        f"{source_line}\n\n"
+        f"Content to summarize:\n{content}"
+    )
+
+    try:
+        completion = await chat_completion(
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            model=settings.summary_model,
+            max_tokens=max_tokens,
+        )
+        summary = (completion["content"] or "").strip()
+        if not summary:
+            return content[:max_chars], completion.get("usage")
+        return summary[:max_chars], completion.get("usage")
+    except UpstreamServiceError as exc:
+        logger.warning("Result summarization failed for %r: %s", url or title, exc)
+        return content[:max_chars], None
+
+
+async def summarize_results_progressively(
+    section_results: dict[str, list[SearchResult]],
+    topic: str,
+    outline: list[dict[str, str]],
+    content_map: dict[str, str] | None = None,
+    max_chars: int = 800,
+    max_tokens: int = 500,
+    progress_callback: Callable[[str, str], None] | None = None,
+) -> tuple[dict[str, str], TokenUsage]:
+    """Summarize all search results per-section before synthesis.
+
+    Runs summarizations concurrently via ``asyncio.gather``.  Each result's
+    raw content (from *content_map*) or snippet is distilled to *max_chars*.
+    Returns a new content map keyed by URL with summarized text.
+
+    On individual failures the raw content is kept (truncated).  The caller
+    can safely merge the returned map into an existing content_map.
+    """
+    total_usage = TokenUsage()
+    summarized_map: dict[str, str] = {}
+
+    section_desc = {item["section"]: item.get("description", "") for item in outline}
+
+    tasks: list[tuple[str, asyncio.Task]] = []  # (url, coroutine)
+    urls_order: list[str] = []
+
+    for section, results in section_results.items():
+        desc = section_desc.get(section, section)
+        for r in results:
+            body = (content_map or {}).get(r.url, r.snippet)
+            urls_order.append(r.url)
+            tasks.append(
+                summarize_single_result(
+                    topic=topic,
+                    section=f"{section}: {desc}",
+                    content=body,
+                    url=r.url,
+                    title=r.title,
+                    max_chars=max_chars,
+                    max_tokens=max_tokens,
+                )
+            )
+
+    if not tasks:
+        return summarized_map, total_usage
+
+    if progress_callback:
+        progress_callback("summarization", f"Summarizing {len(tasks)} results")
+
+    outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for url, outcome in zip(urls_order, outcomes):
+        if isinstance(outcome, Exception):
+            logger.warning("Progressive summarization failed for %r: %s", url, outcome)
+            # Keep whatever raw content we had — don't add to summarized_map
+            continue
+        summary_text, usage_dict = outcome
+        summarized_map[url] = summary_text
+        if usage_dict:
+            _merge_usage(total_usage, usage_dict)
+
+    return summarized_map, total_usage
+
+
 def format_results_for_synthesis(
     results: list[SearchResult],
     content_map: dict[str, str] | None = None,
@@ -649,6 +879,16 @@ async def deep_research(
 
     _progress("start", f"Starting research on: {query}")
 
+    # Step 0: Generate research brief (refined topic for planning stages)
+    # The original query is preserved for synthesis so the essay answers
+    # what the user actually asked.
+    topic = query  # refined topic used for outline + query generation
+    if settings.research_brief_enabled:
+        topic, brief_usage = await generate_research_brief(query)
+        _merge_usage(total_usage, brief_usage.model_dump())
+        if topic != query:
+            _progress("brief", f"Research brief: {topic[:200]}")
+
     # Step 1: Use provided outline or generate one
     if outline:
         # Validate provided outline format
@@ -669,12 +909,12 @@ async def deep_research(
 
     if not outline:
         try:
-            outline, usage = await generate_outline(query, num_sections=stages)
+            outline, usage = await generate_outline(topic, num_sections=stages)
             _merge_usage(total_usage, usage.model_dump())
         except Exception as exc:
             logger.warning("Outline generation failed, using fallback: %s", exc)
             outline = [
-                {"section": f"Section {i + 1}", "description": f"Research aspect {i + 1} of {query}"}
+                {"section": f"Section {i + 1}", "description": f"Research aspect {i + 1} of {topic}"}
                 for i in range(stages)
             ]
 
@@ -695,7 +935,7 @@ async def deep_research(
             section_name = section_item["section"]
             if is_first_pass:
                 task = generate_subqueries_for_section(
-                    topic=query,
+                    topic=topic,
                     section=section_name,
                     description=section_item["description"],
                     num_queries=sub_queries_per_stage,
@@ -716,7 +956,7 @@ async def deep_research(
                         gap_context += f"\nSuggested focus areas: {', '.join(focus)}"
 
                 task = generate_refined_queries(
-                    topic=query,
+                    topic=topic,
                     section=section_name,
                     current_results=section_results[section_name],
                     num_queries=sub_queries_per_stage,
@@ -742,7 +982,7 @@ async def deep_research(
                     # Retry with initial query generation as fallback
                     try:
                         fallback = await generate_subqueries_for_section(
-                            topic=query,
+                            topic=topic,
                             section=section_item["section"],
                             description=section_item["description"],
                             num_queries=sub_queries_per_stage,
@@ -816,7 +1056,7 @@ async def deep_research(
         # 2c: Reflect on findings — assess coverage and decide whether to continue
         if passes > 1:
             reflection, reflection_usage = await reflect_on_findings(
-                topic=query,
+                topic=topic,
                 outline=outline,
                 section_results=section_results,
                 pass_num=pass_num,
@@ -882,7 +1122,7 @@ async def deep_research(
                 sections_for_extraction.append(section)
                 selection_tasks.append(
                     select_relevant_results(
-                        topic=query,
+                        topic=topic,
                         section=section,
                         description=item["description"],
                         results=section_res,
@@ -935,6 +1175,25 @@ async def deep_research(
             logger.info(
                 "Enriched synthesis with full content from %d pages",
                 len(content_map),
+            )
+
+    # Step 3b: Progressive content summarization
+    if settings.progressive_summarization and content_map:
+        _progress("summarization", "Summarizing extracted content")
+        summarized_map, summary_usage = await summarize_results_progressively(
+            section_results=final_section_results,
+            topic=topic,
+            outline=outline,
+            content_map=content_map,
+            max_chars=settings.progressive_summary_max_chars,
+            max_tokens=settings.progressive_summary_max_tokens,
+            progress_callback=progress_callback,
+        )
+        _merge_usage(total_usage, summary_usage.model_dump())
+        if summarized_map:
+            content_map.update(summarized_map)
+            logger.info(
+                "Progressively summarized %d results", len(summarized_map),
             )
 
     # Step 4: Synthesize with outline
@@ -1078,6 +1337,63 @@ def filter_results_by_relevance_sync(
 # Hierarchical Supervisor-Researcher Architecture
 # ---------------------------------------------------------------------------
 
+
+class _ResearcherState:
+    """Tracks researcher progress for deterministic stopping heuristics.
+
+    Each ``_run_researcher()`` call creates its own instance so there are
+    no concurrency concerns.
+    """
+
+    def __init__(
+        self,
+        min_relevant_sources: int = 3,
+        overlap_threshold: float = 0.6,
+    ) -> None:
+        self.min_relevant_sources = min_relevant_sources
+        self.overlap_threshold = overlap_threshold
+        self.relevant_source_count: int = 0
+        self.search_result_urls: list[set[str]] = []
+        self.search_count: int = 0
+        self.last_stop_reason: str | None = None
+
+    def record_search(self, results: list[SearchResult]) -> None:
+        """Record URLs from a search round for overlap tracking."""
+        self.search_result_urls.append({r.url for r in results if r.url})
+        self.search_count += 1
+
+    def record_page_read(self, content: str | None) -> None:
+        """Track a successfully read page as a relevant source."""
+        if content and len(content) > 200:
+            self.relevant_source_count += 1
+
+    def last_two_searches_overlap(self) -> bool:
+        """Check if the last 2 searches returned mostly overlapping URLs."""
+        if len(self.search_result_urls) < 2:
+            return False
+        last = self.search_result_urls[-1]
+        prev = self.search_result_urls[-2]
+        if not last or not prev:
+            return False
+        overlap = len(last & prev) / max(len(last | prev), 1)
+        return overlap >= self.overlap_threshold
+
+    def should_stop(self) -> str | None:
+        """Return a stop reason string, or None to continue."""
+        if self.relevant_source_count >= self.min_relevant_sources:
+            reason = (
+                f"Sufficient sources: {self.relevant_source_count} relevant "
+                f"pages read (threshold: {self.min_relevant_sources})"
+            )
+            self.last_stop_reason = reason
+            return reason
+        if self.last_two_searches_overlap():
+            reason = "Diminishing returns: last 2 searches returned mostly overlapping results"
+            self.last_stop_reason = reason
+            return reason
+        return None
+
+
 # Tool definitions for researcher agents
 _RESEARCHER_TOOL_DEFINITIONS: list[dict] = [
     {
@@ -1175,6 +1491,10 @@ async def _run_researcher(
     all_queries: list[str] = []
     content_map: dict[str, str] = {}
     search_count = 0
+    state = _ResearcherState(
+        min_relevant_sources=settings.researcher_min_relevant_sources,
+        overlap_threshold=settings.researcher_overlap_threshold,
+    )
 
     def _progress(msg: str) -> None:
         if progress_callback:
@@ -1188,6 +1508,7 @@ async def _run_researcher(
         results = await search_searxng(query=query, max_results=results_per_query)
         all_results.extend(results)
         all_queries.append(query)
+        state.record_search(results)
         if not results:
             return "No results found."
         parts = []
@@ -1204,7 +1525,9 @@ async def _run_researcher(
         )
         if content:
             content_map[url] = content
+            state.record_page_read(content)
             return sanitize_content(content)
+        state.record_page_read(None)
         return "Failed to extract content from this page."
 
     async def _note(thought: str) -> str:
@@ -1246,6 +1569,9 @@ Research strategy:
 - Refine with targeted searches if gaps remain
 - Stop when: 3+ relevant sources with substantive information, OR last 2 searches returned mostly similar information to what you already have
 
+Note: The system may ask you to write your findings early if it detects you have gathered
+sufficient information. When this happens, produce your best summary from what you have.
+
 When you have gathered enough information, write a detailed summary of your findings for this section.
 Include specific facts, data points, and quotes where relevant.
 Cite sources by URL inline, e.g. [URL].
@@ -1270,6 +1596,7 @@ Your final response should be ONLY your written findings — no tool calls."""
             tool_handlers=tool_handlers,
             tool_definitions=_RESEARCHER_TOOL_DEFINITIONS,
             max_tool_rounds=max_tool_rounds,
+            should_stop=state.should_stop,
         )
     except UpstreamServiceError as exc:
         logger.warning("Researcher [%s] failed: %s", section, exc)
@@ -1289,7 +1616,8 @@ Your final response should be ONLY your written findings — no tool calls."""
                 "tool_calls_made": 0,
             }
 
-    _progress(f"Done — {search_count} searches, {len(content_map)} pages read")
+    stop_reason = state.last_stop_reason or "max_rounds"
+    _progress(f"Done — {search_count} searches, {len(content_map)} pages read ({stop_reason})")
 
     return {
         "findings": completion["content"],
@@ -1298,6 +1626,7 @@ Your final response should be ONLY your written findings — no tool calls."""
         "content_map": content_map,
         "usage": completion["usage"],
         "search_count": search_count,
+        "stop_reason": stop_reason,
     }
 
 
@@ -1353,6 +1682,14 @@ async def supervised_deep_research(
 
     _progress("start", f"Starting supervised research on: {query}")
 
+    # Step 0: Generate research brief (refined topic for planning stages)
+    topic = query
+    if settings.research_brief_enabled:
+        topic, brief_usage = await generate_research_brief(query)
+        _merge_usage(total_usage, brief_usage.model_dump())
+        if topic != query:
+            _progress("brief", f"Research brief: {topic[:200]}")
+
     # Step 1: Generate or validate outline (same as flat pipeline)
     if outline:
         validated_outline = []
@@ -1369,12 +1706,12 @@ async def supervised_deep_research(
 
     if not outline:
         try:
-            outline, usage = await generate_outline(query, num_sections=stages)
+            outline, usage = await generate_outline(topic, num_sections=stages)
             _merge_usage(total_usage, usage.model_dump())
         except Exception as exc:
             logger.warning("Outline generation failed, using fallback: %s", exc)
             outline = [
-                {"section": f"Section {i + 1}", "description": f"Research aspect {i + 1} of {query}"}
+                {"section": f"Section {i + 1}", "description": f"Research aspect {i + 1} of {topic}"}
                 for i in range(stages)
             ]
 
@@ -1386,7 +1723,7 @@ async def supervised_deep_research(
     researcher_tasks = []
     for item in outline:
         task = _run_researcher(
-            topic=query,
+            topic=topic,
             section=item["section"],
             description=item["description"],
             results_per_query=results_per_query,
@@ -1426,6 +1763,42 @@ async def supervised_deep_research(
     if len(unique_urls) > 5:
         urls_msg += f"... (+{len(unique_urls) - 5} more)"
     _progress("search", urls_msg)
+
+    # Step 3b: Progressive summarization of long researcher findings
+    max_findings_chars = settings.progressive_summary_max_chars * 3
+    if settings.progressive_summarization:
+        condense_tasks = []
+        sections_to_condense: list[str] = []
+        for item in outline:
+            section = item["section"]
+            findings = researcher_findings.get(section, "")
+            if len(findings) > max_findings_chars:
+                sections_to_condense.append(section)
+                condense_tasks.append(
+                    summarize_single_result(
+                        topic=topic,
+                        section=f"{section}: {item['description']}",
+                        content=findings,
+                        title=section,
+                        max_chars=max_findings_chars,
+                        max_tokens=settings.progressive_summary_max_tokens * 2,
+                    )
+                )
+        if condense_tasks:
+            _progress("summarization", f"Condensing {len(condense_tasks)} long findings")
+            condense_outcomes = await asyncio.gather(
+                *condense_tasks, return_exceptions=True
+            )
+            for section, outcome in zip(sections_to_condense, condense_outcomes):
+                if isinstance(outcome, Exception):
+                    logger.warning(
+                        "Finding condensation failed for %r: %s", section, outcome
+                    )
+                    continue
+                summary_text, usage_dict = outcome
+                researcher_findings[section] = summary_text
+                if usage_dict:
+                    _merge_usage(total_usage, usage_dict)
 
     # Step 4: Synthesize essay from researcher findings
     _progress("synthesis", "Synthesizing final essay from researcher findings")
