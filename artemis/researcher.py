@@ -239,13 +239,24 @@ async def generate_refined_queries(
     current_results: list[SearchResult],
     num_queries: int,
     existing_queries: list[str],
+    gap_context: str = "",
 ) -> tuple[list[str], TokenUsage]:
-    """Generate refined queries based on current findings."""
+    """Generate refined queries based on current findings.
+
+    Args:
+        topic: Overall research topic
+        section: Outline section name
+        current_results: Results gathered so far for this section
+        num_queries: Number of queries to generate
+        existing_queries: Previously executed queries (avoid repeats)
+        gap_context: Optional gap analysis from a reflection step,
+            describing what's missing and where to focus.
+    """
     settings = get_settings()
-    
+
     # Summarize current findings (untrusted web content)
     findings = format_results_for_synthesis(current_results[:10])
-    
+
     system = "You are a research query refinement specialist. Based on initial findings, generate better follow-up queries."
 
     messages = [
@@ -255,7 +266,7 @@ async def generate_refined_queries(
 Section: {section}
 
 Already Explored Queries: {', '.join(existing_queries)}
-
+{gap_context}
 Generate {num_queries} NEW queries that explore aspects NOT yet covered by existing queries.
 Focus on gaps, unanswered questions, or deeper exploration of promising leads.
 Respond with ONLY a JSON array of strings.
@@ -271,6 +282,178 @@ Example: ["deeper aspect query", "contradiction check query"]"""},
     queries = _parse_query_list(completion["content"])
     usage = TokenUsage.model_validate(completion["usage"] or {})
     return queries, usage
+
+
+def _parse_reflection(raw_content: str) -> dict:
+    """Parse LLM reflection response into a structured dict.
+
+    Expected keys: section_assessments (dict of section → assessment),
+    should_continue (bool), and focus_areas (list of strings).
+
+    Gracefully falls back to a "continue" verdict on parse failure so that
+    the pipeline never stops prematurely due to a malformed reflection.
+    """
+    _DEFAULT = {
+        "section_assessments": {},
+        "should_continue": True,
+        "focus_areas": [],
+    }
+    candidate = raw_content.strip()
+    if candidate.startswith("```"):
+        candidate = candidate.strip("`")
+        if candidate.startswith("json"):
+            candidate = candidate[4:].strip()
+
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError:
+        # Try extracting a JSON object from surrounding text
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+        if start < 0 or end <= start:
+            logger.warning("Reflection parse failed, continuing: %s", raw_content[:200])
+            return _DEFAULT
+        try:
+            parsed = json.loads(candidate[start : end + 1])
+        except json.JSONDecodeError:
+            logger.warning("Reflection parse failed, continuing: %s", raw_content[:200])
+            return _DEFAULT
+
+    if not isinstance(parsed, dict):
+        return _DEFAULT
+
+    # Normalise section_assessments
+    assessments = parsed.get("section_assessments", {})
+    if not isinstance(assessments, dict):
+        assessments = {}
+
+    # Normalise should_continue — accept booleans and strings
+    raw_continue = parsed.get("should_continue", True)
+    if isinstance(raw_continue, bool):
+        should_continue = raw_continue
+    elif isinstance(raw_continue, str):
+        should_continue = raw_continue.lower() not in {"false", "no", "0"}
+    else:
+        should_continue = True
+
+    focus_areas = parsed.get("focus_areas", [])
+    if not isinstance(focus_areas, list):
+        focus_areas = []
+    focus_areas = [str(f) for f in focus_areas if f]
+
+    return {
+        "section_assessments": assessments,
+        "should_continue": should_continue,
+        "focus_areas": focus_areas,
+    }
+
+
+async def reflect_on_findings(
+    topic: str,
+    outline: list[dict[str, str]],
+    section_results: dict[str, list[SearchResult]],
+    pass_num: int,
+    total_passes: int,
+) -> tuple[dict, TokenUsage]:
+    """Reflect on research findings after a search pass.
+
+    The LLM assesses per-section coverage, identifies gaps, and recommends
+    whether further searching is worthwhile. This implements the "think"
+    pattern — explicit introspection between search rounds.
+
+    Args:
+        topic: Overall research topic
+        outline: Research outline sections
+        section_results: Results gathered per section so far
+        pass_num: Current pass number (1-based)
+        total_passes: Total planned passes
+
+    Returns:
+        Tuple of (reflection dict, token usage).
+        The reflection dict contains:
+        - section_assessments: per-section coverage assessment with gaps
+        - should_continue: whether another pass is worthwhile
+        - focus_areas: suggested areas to focus on next
+    """
+    settings = get_settings()
+
+    # Build a summary of what we have per section
+    section_summaries = []
+    for item in outline:
+        section = item["section"]
+        results = section_results.get(section, [])
+        if results:
+            sample = format_results_for_synthesis(results[:5])
+            section_summaries.append(
+                f"## {section} ({len(results)} results)\n{sample}"
+            )
+        else:
+            section_summaries.append(f"## {section} (0 results)\nNo results found yet.")
+
+    findings_block = "\n\n".join(section_summaries)
+    outline_str = "\n".join(
+        f"- {item['section']}: {item['description']}" for item in outline
+    )
+
+    system = (
+        "You are a research quality assessor. After a round of web searches, "
+        "reflect on what has been found, what is missing, and whether more "
+        "searching is worthwhile."
+    )
+
+    user = f"""Topic: {topic}
+
+Research outline:
+{outline_str}
+
+This is pass {pass_num} of {total_passes} planned passes.
+
+Current findings:
+{findings_block}
+
+Assess the research so far. Respond with ONLY a JSON object:
+
+{{
+  "section_assessments": {{
+    "Section Name": {{
+      "coverage": "good|partial|poor",
+      "gaps": ["specific gap or missing angle"],
+      "sufficient": true or false
+    }}
+  }},
+  "should_continue": true or false,
+  "focus_areas": ["area to focus on in the next pass"]
+}}
+
+Set should_continue to false if:
+- Most sections have good coverage with 3+ relevant sources each
+- Further searches are unlikely to yield substantially new information
+- We are on the last planned pass
+
+Set should_continue to true if:
+- Any section has poor coverage or significant gaps
+- Key aspects of the topic are not yet covered"""
+
+    try:
+        completion = await chat_completion(
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": findings_block},
+                {"role": "user", "content": user},
+            ],
+            model=settings.summary_model,
+            max_tokens=2000,
+        )
+        reflection = _parse_reflection(completion["content"])
+        usage = TokenUsage.model_validate(completion["usage"] or {})
+        return reflection, usage
+    except UpstreamServiceError as exc:
+        logger.warning("Reflection failed, continuing by default: %s", exc)
+        return {
+            "section_assessments": {},
+            "should_continue": True,
+            "focus_areas": [],
+        }, TokenUsage()
 
 
 async def search_and_collect(query: str, max_results: int) -> list[SearchResult]:
@@ -457,6 +640,7 @@ async def deep_research(
     all_sub_queries: list[str] = []
     section_results: dict[str, list[SearchResult]] = {}
     total_search_requests = 0
+    last_reflection: dict | None = None  # Most recent reflection output
 
     # Progress callback helper
     def _progress(stage: str, message: str):
@@ -504,33 +688,40 @@ async def deep_research(
         _progress("pass", f"Starting research pass {pass_num}/{passes}")
         is_first_pass = pass_num == 1
         
-        # Get results summary from previous pass for refinement
-        previous_findings = None
-        if not is_first_pass:
-            # Summarize what we found in previous passes
-            sample_results = all_results[:15]
-            previous_findings = format_results_for_synthesis(sample_results)
-        
         # 2a: Generate all queries in parallel
+        # On later passes, incorporate gap analysis from the previous reflection
         query_generation_tasks = []
         for section_item in outline:
+            section_name = section_item["section"]
             if is_first_pass:
                 task = generate_subqueries_for_section(
                     topic=query,
-                    section=section_item["section"],
+                    section=section_name,
                     description=section_item["description"],
                     num_queries=sub_queries_per_stage,
                     existing_queries=all_sub_queries,
                     results_summary=None,
                 )
             else:
-                # Refine queries based on findings
+                # Build gap context from the previous reflection
+                gap_context = ""
+                if last_reflection:
+                    assessments = last_reflection.get("section_assessments", {})
+                    section_assessment = assessments.get(section_name, {})
+                    gaps = section_assessment.get("gaps", [])
+                    focus = last_reflection.get("focus_areas", [])
+                    if gaps:
+                        gap_context = f"\nIdentified gaps: {', '.join(gaps)}"
+                    if focus:
+                        gap_context += f"\nSuggested focus areas: {', '.join(focus)}"
+
                 task = generate_refined_queries(
                     topic=query,
-                    section=section_item["section"],
-                    current_results=section_results[section_item["section"]],
+                    section=section_name,
+                    current_results=section_results[section_name],
                     num_queries=sub_queries_per_stage,
                     existing_queries=all_sub_queries,
+                    gap_context=gap_context,
                 )
             query_generation_tasks.append(task)
         
@@ -621,6 +812,44 @@ async def deep_research(
         if len(unique_urls) > 5:
             urls_msg += f"... (+{len(unique_urls)-5} more)"
         _progress("search", urls_msg)
+
+        # 2c: Reflect on findings — assess coverage and decide whether to continue
+        if passes > 1:
+            reflection, reflection_usage = await reflect_on_findings(
+                topic=query,
+                outline=outline,
+                section_results=section_results,
+                pass_num=pass_num,
+                total_passes=passes,
+            )
+            _merge_usage(total_usage, reflection_usage.model_dump())
+            last_reflection = reflection
+
+            # Log reflection summary
+            assessments = reflection.get("section_assessments", {})
+            gap_sections = [
+                s for s, a in assessments.items()
+                if isinstance(a, dict) and not a.get("sufficient", True)
+            ]
+            if gap_sections:
+                _progress(
+                    "reflection",
+                    f"Gaps identified in: {', '.join(gap_sections)}",
+                )
+            else:
+                _progress("reflection", "All sections have adequate coverage")
+
+            # Early stopping: skip remaining passes if reflection says sufficient
+            if not reflection.get("should_continue", True) and pass_num < passes:
+                logger.info(
+                    "Reflection recommends stopping after pass %d/%d",
+                    pass_num, passes,
+                )
+                _progress(
+                    "reflection",
+                    f"Sufficient coverage reached — skipping {passes - pass_num} remaining pass(es)",
+                )
+                break
 
     # Deduplicate and synthesize
     unique_results = _deduplicate_results(all_results)
@@ -979,8 +1208,15 @@ async def _run_researcher(
         return "Failed to extract content from this page."
 
     async def _note(thought: str) -> str:
-        logger.debug("Researcher [%s] note: %s", section, thought[:200])
-        return "Noted."
+        logger.info("Researcher [%s] reflection: %s", section, thought[:300])
+        _progress(f"Reflecting: {thought[:120]}")
+        return (
+            f"Reflection recorded: {thought}\n\n"
+            "Now decide your next action:\n"
+            "- If you identified gaps, search for them.\n"
+            "- If you found promising URLs, read them.\n"
+            "- If you have enough information, write your findings."
+        )
 
     system = f"""You are an autonomous research agent assigned to investigate one section of a larger research report.
 
@@ -992,14 +1228,23 @@ Your assignment:
 You have three tools:
 1. web_search — search the web for information
 2. read_page — read the full content of a promising URL from search results
-3. note — record your thoughts about what you've found and what's missing
+3. note — MANDATORY reflection tool (see below)
+
+IMPORTANT — Research protocol:
+You MUST call the note tool after every 1-2 searches to reflect. In your note, answer:
+  1. What did I find that's useful for this section?
+  2. What specific gaps or questions remain unanswered?
+  3. Should I search more, read a page, or do I have enough to write?
+
+This reflection is critical — it prevents wasted searches and helps you stay focused.
 
 Research strategy:
-- Start with 2-3 broad searches, then refine based on what you find
-- Read the most promising pages in full (2-4 pages)
-- Use note to reflect after each round: What did you learn? What's missing? Should you stop?
-- Stop when you have 3+ relevant sources with substantive information, or when further searches return similar information
-- Prefer authoritative and recent sources
+- Start with 2-3 broad searches
+- Call note to reflect on what you found
+- Read the most promising 2-4 pages in full
+- Call note again to assess completeness
+- Refine with targeted searches if gaps remain
+- Stop when: 3+ relevant sources with substantive information, OR last 2 searches returned mostly similar information to what you already have
 
 When you have gathered enough information, write a detailed summary of your findings for this section.
 Include specific facts, data points, and quotes where relevant.
