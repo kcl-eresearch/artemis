@@ -738,17 +738,27 @@ async def synthesize_essay_with_outline(
 
     system = """You are a research synthesis specialist. Write a comprehensive, well-structured research report following the provided outline.
 
+CRITICAL: Begin your response directly with the report content (e.g. the title or introduction). Do NOT include any preamble, meta-commentary, or statements like "Here is the report" or "I'll compile the findings."
+
 Write a thorough research report that:
 1. Has a clear introduction explaining the topic
 2. Follows the outline structure with dedicated sections
 3. Synthesizes information from multiple sources within each section
-4. Uses inline citations like [1], [2], etc. referencing the URLs
+4. When sources conflict, explicitly acknowledge the disagreement and, where possible, explain why (e.g. different study populations, time periods, or methodologies) rather than simply presenting both claims
 5. Has substantive content in each section
 6. Ends with a conclusion summarizing key findings
-7. Note any conflicting information or disagreements between sources
+
+Citation format — use numbered references [1], [2], etc. inline. At the end of the report include a "References" section listing each cited source with:
+- The reference number
+- Author or organisation name (if identifiable from the content)
+- Title of the page or article
+- URL
+- Year or access date if available
+For example: [1] de Cabo, R. & Mattson, M. — "Effects of Intermittent Fasting on Health" — https://example.com — 2019
 
 The report should be detailed and comprehensive.
-Make it as long as necessary to cover all the information gathered."""
+Make it as long as necessary to cover all the information gathered.
+Proofread for grammar, spelling, and consistency before finishing."""
 
     user = f"Topic: {topic}\n\nReport Outline:\n{outline_str}"
 
@@ -1574,7 +1584,7 @@ sufficient information. When this happens, produce your best summary from what y
 
 When you have gathered enough information, write a detailed summary of your findings for this section.
 Include specific facts, data points, and quotes where relevant.
-Cite sources by URL inline, e.g. [URL].
+Cite sources inline by URL, and where possible note the author/organisation and year, e.g. (Author, 2024) [URL].
 Your final response should be ONLY your written findings — no tool calls."""
 
     messages: list[dict] = [
@@ -1814,17 +1824,27 @@ async def supervised_deep_research(
 
     system = """You are a research synthesis specialist. Write a comprehensive, well-structured research report from the findings gathered by multiple research agents.
 
+CRITICAL: Begin your response directly with the report content (e.g. the title or introduction). Do NOT include any preamble, meta-commentary, or statements like "Here is the report" or "I'll compile the findings."
+
 Write a thorough research report that:
 1. Has a clear introduction explaining the topic
 2. Follows the outline structure with dedicated sections
 3. Synthesizes and integrates the findings from each researcher
-4. Uses inline citations like [1], [2], etc. referencing the URLs
+4. When sources conflict, explicitly acknowledge the disagreement and, where possible, explain why (e.g. different study populations, time periods, or methodologies) rather than simply presenting both claims
 5. Has substantive content in each section
 6. Ends with a conclusion summarizing key findings
-7. Notes any conflicting information or disagreements between sources
+
+Citation format — use numbered references [1], [2], etc. inline. At the end of the report include a "References" section listing each cited source with:
+- The reference number
+- Author or organisation name (if identifiable from the content)
+- Title of the page or article
+- URL
+- Year or access date if available
+For example: [1] de Cabo, R. & Mattson, M. — "Effects of Intermittent Fasting on Health" — https://example.com — 2019
 
 The report should be detailed and comprehensive.
-Make it as long as necessary to cover all the information gathered."""
+Make it as long as necessary to cover all the information gathered.
+Proofread for grammar, spelling, and consistency before finishing."""
 
     user = f"Topic: {query}\n\nReport Outline:\n{outline_str}"
 
