@@ -20,6 +20,10 @@ RUN addgroup --system app && adduser --system --ingroup app app
 # Copy application
 COPY artemis/ ./artemis/
 
+# Pre-create the reports dir owned by the app user so the default
+# REPORTS_DIR=./reports is writable when the container drops to USER app.
+RUN mkdir -p /app/reports && chown -R app:app /app/reports
+
 # Expose port
 EXPOSE 8000
 
