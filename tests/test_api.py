@@ -78,6 +78,9 @@ class APITestCase(unittest.TestCase):
                 progressive_summary_max_tokens=500,
                 researcher_min_relevant_sources=3,
                 researcher_overlap_threshold=0.6,
+                reports_dir="./reports",
+                reports_ttl_hours=24,
+                reports_cleanup_interval_seconds=3600,
             ),
         ):
             unauthorized = self.client.post("/search", json={"query": "fastapi"})
@@ -154,6 +157,9 @@ class APITestCase(unittest.TestCase):
             progressive_summary_max_tokens=500,
             researcher_min_relevant_sources=3,
             researcher_overlap_threshold=0.6,
+            reports_dir="./reports",
+            reports_ttl_hours=24,
+            reports_cleanup_interval_seconds=3600,
         )
 
         with patch("artemis.main.get_settings", return_value=settings):
@@ -238,6 +244,9 @@ class APITestCase(unittest.TestCase):
                 progressive_summary_max_tokens=500,
                 researcher_min_relevant_sources=3,
                 researcher_overlap_threshold=0.6,
+                reports_dir="./reports",
+                reports_ttl_hours=24,
+                reports_cleanup_interval_seconds=3600,
             ),
         ):
             response = self.client.post(

@@ -49,6 +49,7 @@ from artemis.models import (
     SearchResultsBlock,
     TokenUsage,
 )
+from artemis import reports
 from artemis.researcher import deep_research, generate_outline, supervised_deep_research
 from artemis.searcher import search_searxng
 from artemis.searcher import close_client as close_searxng_client
@@ -121,13 +122,39 @@ if not initial_settings.allowed_origins:
 security = HTTPBearer(auto_error=False)
 
 
+async def _reports_cleanup_loop() -> None:
+    """Periodically purge expired report files."""
+    settings = get_settings()
+    interval = settings.reports_cleanup_interval_seconds
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            await asyncio.to_thread(
+                reports.cleanup_expired,
+                settings.reports_dir,
+                settings.reports_ttl_hours,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Reports cleanup pass failed; will retry next interval.")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     """Manage application startup and shutdown lifecycle."""
-    yield
-    await close_llm_client()
-    await close_searxng_client()
-    await close_extractor_client()
+    cleanup_task = asyncio.create_task(_reports_cleanup_loop())
+    try:
+        yield
+    finally:
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
+        await close_llm_client()
+        await close_searxng_client()
+        await close_extractor_client()
 
 
 @dataclass
@@ -641,7 +668,7 @@ async def responses(
             request.input,
             num_sections=request.max_steps or preset_config.stages,
         )
-        return ResponsesAPIResponse(
+        api_response = ResponsesAPIResponse(
             id=str(uuid.uuid4()),
             created_at=_created_timestamp(),
             model=preset_config.model_name,
@@ -649,6 +676,10 @@ async def responses(
             outline=outline,
             usage=usage,
         )
+        await asyncio.to_thread(
+            reports.save, settings.reports_dir, api_response.id, api_response.model_dump()
+        )
+        return api_response
 
     if request.preset in {"deep-research", "shallow-research"}:
         settings = get_settings()
@@ -673,7 +704,7 @@ async def responses(
             research_task.cancel()
             raise
 
-        return ResponsesAPIResponse(
+        api_response = ResponsesAPIResponse(
             id=str(uuid.uuid4()),
             created_at=_created_timestamp(),
             model=preset_config.model_name,
@@ -683,6 +714,10 @@ async def responses(
             ],
             usage=research_run.usage,
         )
+        await asyncio.to_thread(
+            reports.save, settings.reports_dir, api_response.id, api_response.model_dump()
+        )
+        return api_response
 
     results = await search_searxng(query=request.input, max_results=10)
     summary, usage, warnings = await _build_summary(request.input, results)
@@ -692,7 +727,7 @@ async def responses(
     citation_chars = sum(len(r.snippet or "") + len(r.title) for r in results)
     response_usage.citation_tokens = citation_chars // 4
 
-    return ResponsesAPIResponse(
+    api_response = ResponsesAPIResponse(
         id=str(uuid.uuid4()),
         created_at=_created_timestamp(),
         model="artemis-search",
@@ -703,6 +738,11 @@ async def responses(
         usage=response_usage,
         warnings=warnings,
     )
+    settings = get_settings()
+    await asyncio.to_thread(
+        reports.save, settings.reports_dir, api_response.id, api_response.model_dump()
+    )
+    return api_response
 
 
 if __name__ == "__main__":

@@ -304,6 +304,9 @@ class Settings:
             may stop early (code-level heuristic, independent of LLM judgment).
         researcher_overlap_threshold: URL overlap ratio (0.0–1.0) between last 2 searches
             that triggers early stopping due to diminishing returns.
+        reports_dir: Directory where background-job report JSON files are persisted.
+        reports_ttl_hours: How long to keep report files on disk before purging.
+        reports_cleanup_interval_seconds: How often the periodic purge task runs.
     """
 
     searxng_api_base: str
@@ -351,6 +354,9 @@ class Settings:
     progressive_summary_max_tokens: int
     researcher_min_relevant_sources: int
     researcher_overlap_threshold: float
+    reports_dir: str
+    reports_ttl_hours: int
+    reports_cleanup_interval_seconds: int
 
 
 @lru_cache(maxsize=1)
@@ -482,6 +488,13 @@ def get_settings() -> Settings:
         ),
         researcher_overlap_threshold=_parse_float(
             "RESEARCHER_OVERLAP_THRESHOLD", 0.6, minimum=0.0, maximum=1.0
+        ),
+        reports_dir=os.getenv("REPORTS_DIR", "./reports").strip() or "./reports",
+        reports_ttl_hours=_parse_int(
+            "REPORTS_TTL_HOURS", 24, minimum=1, maximum=24 * 365
+        ),
+        reports_cleanup_interval_seconds=_parse_int(
+            "REPORTS_CLEANUP_INTERVAL_SECONDS", 3600, minimum=60, maximum=86400
         ),
     )
 
