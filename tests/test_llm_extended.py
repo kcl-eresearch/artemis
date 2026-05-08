@@ -11,6 +11,8 @@ from artemis.llm import (
     build_tool_messages,
     sanitize_content,
     _normalize_usage,
+    _parse_kimi_tool_calls,
+    _strip_llm_artifacts,
 )
 
 
@@ -276,3 +278,72 @@ class BuildToolMessagesTestCase(unittest.TestCase):
         self.assertEqual(
             msgs[2]["tool_calls"][0]["function"]["name"], "fetch_page"
         )
+
+
+class ParseKimiToolCallsTestCase(unittest.TestCase):
+    """Defensive parser for Kimi K2 inline tool-call markers that the
+    serving backend's tool parser failed to capture."""
+
+    def test_no_markers_returns_input_unchanged(self) -> None:
+        text, calls = _parse_kimi_tool_calls("just a plain answer")
+        self.assertEqual(text, "just a plain answer")
+        self.assertEqual(calls, [])
+
+    def test_single_call_extracted(self) -> None:
+        content = (
+            "<|tool_calls_section_begin|> "
+            "<|tool_call_begin|> functions.web_search:42 "
+            '<|tool_call_argument_begin|> {"query": "supernova"} '
+            "<|tool_call_end|> "
+            "<|tool_calls_section_end|>"
+        )
+        text, calls = _parse_kimi_tool_calls(content)
+        self.assertEqual(text, "")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["function"]["name"], "web_search")
+        self.assertEqual(calls[0]["function"]["arguments"], '{"query": "supernova"}')
+        self.assertEqual(calls[0]["type"], "function")
+        self.assertTrue(calls[0]["id"].startswith("call_"))
+
+    def test_multiple_calls_extracted_in_order(self) -> None:
+        content = (
+            "<|tool_calls_section_begin|>"
+            '<|tool_call_begin|> functions.web_search:55 <|tool_call_argument_begin|> {"query": "a"} <|tool_call_end|>'
+            '<|tool_call_begin|> functions.web_search:56 <|tool_call_argument_begin|> {"query": "b"} <|tool_call_end|>'
+            '<|tool_call_begin|> functions.web_search:57 <|tool_call_argument_begin|> {"query": "c"} <|tool_call_end|>'
+            "<|tool_calls_section_end|>"
+        )
+        text, calls = _parse_kimi_tool_calls(content)
+        self.assertEqual(text, "")
+        self.assertEqual([c["function"]["arguments"] for c in calls],
+                         ['{"query": "a"}', '{"query": "b"}', '{"query": "c"}'])
+        self.assertEqual({c["function"]["name"] for c in calls}, {"web_search"})
+
+    def test_invalid_json_args_replaced_with_empty_object(self) -> None:
+        content = (
+            "<|tool_call_begin|> functions.web_search:1 "
+            "<|tool_call_argument_begin|> not json at all "
+            "<|tool_call_end|>"
+        )
+        _, calls = _parse_kimi_tool_calls(content)
+        self.assertEqual(calls[0]["function"]["arguments"], "{}")
+
+    def test_prose_around_calls_preserved(self) -> None:
+        content = (
+            "Here's what I found.\n"
+            '<|tool_call_begin|> functions.web_search:1 <|tool_call_argument_begin|> {"query": "x"} <|tool_call_end|>'
+            "\nMore prose."
+        )
+        text, calls = _parse_kimi_tool_calls(content)
+        self.assertIn("Here's what I found.", text)
+        self.assertIn("More prose.", text)
+        self.assertEqual(len(calls), 1)
+
+    def test_strip_llm_artifacts_handles_kimi_format(self) -> None:
+        """Non-agentic callers rely on _strip_llm_artifacts to clean text."""
+        content = (
+            "<|tool_calls_section_begin|>"
+            '<|tool_call_begin|> functions.web_search:1 <|tool_call_argument_begin|> {"query": "x"} <|tool_call_end|>'
+            "<|tool_calls_section_end|>"
+        )
+        self.assertEqual(_strip_llm_artifacts(content), "")

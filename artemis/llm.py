@@ -362,6 +362,60 @@ async def _post_completion(
         raise UpstreamServiceError("The LLM backend returned invalid JSON.") from exc
 
 
+# Kimi K2 inline tool-call format. Each call looks like:
+#   <|tool_call_begin|> functions.web_search:42 <|tool_call_argument_begin|>
+#   {"query": "..."} <|tool_call_end|>
+# Wrapped in an outer <|tool_calls_section_begin|> ... <|tool_calls_section_end|>.
+# When the serving backend's tool parser fails to capture these special
+# tokens, they leak through as plain text in `message.content`.
+_KIMI_TOOL_CALL_BLOCK_RE = re.compile(
+    r"<\|tool_call_begin\|>\s*(?P<name>[^<\s]+)\s*"
+    r"<\|tool_call_argument_begin\|>\s*(?P<args>.*?)\s*"
+    r"<\|tool_call_end\|>",
+    re.DOTALL,
+)
+_KIMI_MARKER_RE = re.compile(
+    r"<\|tool_calls?_section_(?:begin|end)\|>"
+    r"|<\|tool_call_(?:begin|end|argument_begin)\|>"
+)
+
+
+def _parse_kimi_tool_calls(content: str) -> tuple[str, list[dict[str, Any]]]:
+    """Recover Kimi K2-style inline tool calls leaked into ``content``.
+
+    Returns ``(cleaned_text, tool_calls)``. ``tool_calls`` is a list in the
+    OpenAI ``tool_calls`` schema so callers can splice them straight into
+    the agentic loop. ``cleaned_text`` has all Kimi markers removed.
+    """
+    if "<|tool_call_begin|>" not in content:
+        return content, []
+
+    calls: list[dict[str, Any]] = []
+    for match in _KIMI_TOOL_CALL_BLOCK_RE.finditer(content):
+        raw_name = match.group("name").strip()
+        # Names look like "functions.web_search:42" — strip the "functions."
+        # namespace prefix and the ":<call_index>" counter suffix.
+        name = raw_name.split(":", 1)[0]
+        if name.startswith("functions."):
+            name = name[len("functions.") :]
+        args = match.group("args").strip()
+        try:
+            json.loads(args)
+        except (json.JSONDecodeError, ValueError):
+            args = "{}"
+        calls.append(
+            {
+                "id": f"call_{uuid.uuid4().hex[:24]}",
+                "type": "function",
+                "function": {"name": name, "arguments": args},
+            }
+        )
+
+    cleaned = _KIMI_TOOL_CALL_BLOCK_RE.sub("", content)
+    cleaned = _KIMI_MARKER_RE.sub("", cleaned)
+    return cleaned.strip(), calls
+
+
 def _strip_llm_artifacts(content: str) -> str:
     """Strip non-content artifacts that models sometimes emit as plain text.
 
@@ -373,6 +427,7 @@ def _strip_llm_artifacts(content: str) -> str:
           <minimax:tool_call>…</minimax:tool_call>
           <tool_call>…</tool_call>
           <|tool_call|>…<|/tool_call|>
+          <|tool_calls_section_begin|>…<|tool_calls_section_end|>  (Kimi K2)
 
     Returns the cleaned string (may be empty).
     """
@@ -396,6 +451,9 @@ def _strip_llm_artifacts(content: str) -> str:
         content,
         flags=re.DOTALL,
     )
+
+    # Kimi K2 begin/end style markers
+    content, _ = _parse_kimi_tool_calls(content)
 
     return content.strip()
 
@@ -539,7 +597,13 @@ async def agentic_chat_completion(
 
         message, content = _extract_message_content(data)
 
+        # Some serving backends fail to convert inline tool-call special
+        # tokens (Kimi K2 format) into structured `tool_calls`, so they
+        # leak through as text. Recover them here so the loop can execute
+        # the calls instead of returning the raw markers as the answer.
+        recovered_calls: list[dict[str, Any]] = []
         if content is not None:
+            content, recovered_calls = _parse_kimi_tool_calls(content)
             content = _strip_llm_artifacts(content)
             if content:
                 return {
@@ -549,6 +613,13 @@ async def agentic_chat_completion(
                 }
 
         tool_calls_in_response = message.get("tool_calls") if message else None
+        if not tool_calls_in_response and recovered_calls:
+            logger.warning(
+                "Backend tool parser missed %d inline tool call(s); "
+                "recovering from text content.",
+                len(recovered_calls),
+            )
+            tool_calls_in_response = recovered_calls
         if not tool_calls_in_response:
             raise UpstreamServiceError("The LLM backend returned empty content.")
 
