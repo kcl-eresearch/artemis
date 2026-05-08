@@ -694,11 +694,16 @@ async def summarize_results_progressively(
 def format_results_for_synthesis(
     results: list[SearchResult],
     content_map: dict[str, str] | None = None,
+    numbering: dict[str, int] | None = None,
 ) -> str:
     """Format search results into a text block for LLM consumption.
 
     When content_map is provided, uses extracted page content instead of
     the short search snippet, giving the LLM much richer source material.
+
+    When numbering is provided (URL → citation number), each block is
+    prefixed with the assigned ``[N]`` so the synthesis prompt can require
+    the model to cite only by these stable IDs.
 
     All untrusted fields are sanitised to strip control characters.
     """
@@ -707,8 +712,178 @@ def format_results_for_synthesis(
         body = (content_map or {}).get(r.url, r.snippet)
         title = sanitize_content(r.title, max_length=200)
         body = sanitize_content(body)
-        parts.append(f"Title: {title}\nURL: {r.url}\nContent: {body}\n")
+        if numbering is not None and r.url in numbering:
+            header = f"[{numbering[r.url]}] Title: {title}"
+        else:
+            header = f"Title: {title}"
+        date_line = f"\nDate: {r.date}" if r.date else ""
+        parts.append(f"{header}\nURL: {r.url}{date_line}\nContent: {body}\n")
     return "\n---\n".join(parts)
+
+
+def _build_source_registry(
+    outline: list[dict[str, str]],
+    section_results: dict[str, list[SearchResult]],
+    extra_results: list[SearchResult] | None = None,
+) -> tuple[dict[str, int], list[SearchResult]]:
+    """Assign stable 1-based citation IDs to unique sources.
+
+    Walks ``outline`` in order, then any ``extra_results`` provided, and
+    assigns each unique URL a deterministic ``[N]``. Returns ``(url_to_id,
+    ordered_sources)`` where ``ordered_sources[N-1]`` is the SearchResult
+    for citation ``[N]``.
+    """
+    url_to_id: dict[str, int] = {}
+    ordered: list[SearchResult] = []
+
+    def _add(r: SearchResult) -> None:
+        if not r.url or r.url in url_to_id:
+            return
+        ordered.append(r)
+        url_to_id[r.url] = len(ordered)
+
+    for item in outline:
+        for r in section_results.get(item["section"], []):
+            _add(r)
+    for r in extra_results or []:
+        _add(r)
+    return url_to_id, ordered
+
+
+_CITATION_RE = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
+_URL_BRACKET_RE = re.compile(r"\[\s*(https?://[^\s\]]+)\s*\]")
+_REFERENCES_HEADING_RE = re.compile(
+    r"\n+\s*(?:#{1,6}\s*|\*+\s*)?references\s*:?\s*\*?\*?\s*\n.*$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _extract_used_citations(essay: str) -> set[int]:
+    """Find all numeric citation markers actually used in the essay."""
+    used: set[int] = set()
+    for match in _CITATION_RE.finditer(essay):
+        for part in match.group(1).split(","):
+            part = part.strip()
+            if part.isdigit():
+                used.add(int(part))
+    return used
+
+
+def _replace_url_citations(text: str, url_to_id: dict[str, int]) -> str:
+    """Translate ``[https://...]`` markers in researcher prose to ``[N]``.
+
+    URLs not present in the registry are dropped so the synthesizer never
+    sees uncitable references.
+    """
+    def _sub(match: re.Match) -> str:
+        url = match.group(1).rstrip(".,;:")
+        n = url_to_id.get(url)
+        return f"[{n}]" if n is not None else ""
+    return _URL_BRACKET_RE.sub(_sub, text)
+
+
+def _strip_llm_references_section(essay: str) -> str:
+    """Remove any References section the LLM produced despite instructions."""
+    return _REFERENCES_HEADING_RE.sub("", essay).rstrip()
+
+
+def _strip_invalid_citations(
+    essay: str, valid_ids: set[int]
+) -> tuple[str, set[int]]:
+    """Remove ``[N]`` markers whose N is not a real source.
+
+    Returns ``(cleaned_essay, dropped_ids)``. Adjacent punctuation artifacts
+    left by removed markers are tidied up.
+    """
+    dropped: set[int] = set()
+
+    def _sub(match: re.Match) -> str:
+        kept: list[str] = []
+        for part in match.group(1).split(","):
+            part = part.strip()
+            if part.isdigit():
+                n = int(part)
+                if n in valid_ids:
+                    kept.append(str(n))
+                else:
+                    dropped.add(n)
+        return f"[{', '.join(kept)}]" if kept else ""
+
+    cleaned = _CITATION_RE.sub(_sub, essay)
+    cleaned = re.sub(r"[ \t]+([.,;:!?])", r"\1", cleaned)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    return cleaned, dropped
+
+
+def _format_reference_entry(idx: int, source: SearchResult) -> str:
+    """Render one entry for the deterministic References section."""
+    title = sanitize_content(source.title or source.url, max_length=300).strip()
+    parts = [f"[{idx}]"]
+    if title:
+        parts.append(f'"{title}"')
+    parts.append(f"— {source.url}")
+    if source.date:
+        parts.append(f"({source.date})")
+    return " ".join(parts)
+
+
+def _finalize_essay_citations(
+    essay: str, ordered_sources: list[SearchResult]
+) -> str:
+    """Strip fabricated citations and append a deterministic References section.
+
+    1. Removes any References section the LLM wrote.
+    2. Drops ``[N]`` markers that don't correspond to a real source.
+    3. Builds a fresh References section listing only the citation numbers
+       actually used in the prose, sourced from the SearchResult records.
+    """
+    cleaned = _strip_llm_references_section(essay)
+    valid_ids = {i + 1 for i in range(len(ordered_sources))}
+    cleaned, dropped = _strip_invalid_citations(cleaned, valid_ids)
+    if dropped:
+        logger.warning(
+            "Dropped %d fabricated citation(s) from synthesis output: %s",
+            len(dropped), sorted(dropped),
+        )
+
+    used = _extract_used_citations(cleaned)
+    if not used:
+        return cleaned
+
+    entries = [
+        _format_reference_entry(n, ordered_sources[n - 1])
+        for n in sorted(used)
+        if 1 <= n <= len(ordered_sources)
+    ]
+    if not entries:
+        return cleaned
+    return cleaned.rstrip() + "\n\n## References\n\n" + "\n\n".join(entries) + "\n"
+
+
+_SYNTHESIS_CITATION_RULES = """CITATION RULES (mandatory — verifiable citations are non-negotiable).
+
+Each source is shown with a stable number in square brackets at the start of its block (e.g. `[1] Title: ... / Content: ...`). These numbers are the ONLY valid citation IDs.
+
+Citation accuracy — what `[N]` actually means:
+- Attaching `[N]` to a sentence is a verifiable claim that source N's Content block above states the specific fact you are citing it for. Before writing `[N]`, scan the Content block for source N and confirm it contains the fact, statistic, date, name, or quote in question.
+- For numeric values, dates, names, technical terms, and direct quotes: take them verbatim from the cited source's Content and match its precision and wording. Do not round, rephrase, or convert units before citing. If the source says "0.188 million metric tons", do not write "around 190,000 tonnes [N]".
+- If you know a fact from prior knowledge but the cited source does not state it, do NOT attach a citation to that fact. You have three options: (a) find a numbered source whose Content does state it and cite that, (b) state the fact without a citation as background context, or (c) omit it.
+- When multiple sources independently support a claim, cite each one whose Content actually contains it: `[3, 7]`. Do not pad citations with sources that are merely topical.
+- Do NOT bundle several distinct facts under a single citation. One claim → the source(s) that specifically back that claim.
+
+Worked example:
+- Source [3] Content includes the phrase "the experiment began operations in 2018 with a fiducial mass of 50 tons".
+- GOOD: "The experiment began operations in 2018 [3]." — claim matches source verbatim.
+- GOOD: "The experiment has a 50-ton fiducial mass [3]." — claim matches source verbatim.
+- BAD: "The experiment ran from 2018 to 2023 [3]." — the source does not state the end date.
+- BAD: "The detector uses 8-inch photomultiplier tubes [3]." — plausible but the source says nothing about PMTs.
+
+Citation format:
+- Cite inline using `[N]` for one source or `[N, M]` for multiple. No other citation form is allowed — no `[Smith 2024]`, no `[arXiv:1234.5678]`, no `[citation needed]`.
+- NEVER invent a citation number that is not present in the numbered source list above.
+
+References section:
+- Do NOT write a "References", "Bibliography", or similar section at the end. The system will append one automatically from the `[N]` numbers you actually used. End your report with the conclusion."""
 
 
 async def synthesize_essay_with_outline(
@@ -722,21 +897,25 @@ async def synthesize_essay_with_outline(
 ) -> tuple[str, TokenUsage, int]:
     """Synthesize research into essay following the outline structure."""
     settings = get_settings()
-    
+
+    url_to_id, ordered_sources = _build_source_registry(outline, section_results)
+
     sections_text = []
     for item in outline:
         section = item["section"]
         description = item["description"]
         results = section_results.get(section, [])
-        results_text = format_results_for_synthesis(results, content_map=content_map)
+        results_text = format_results_for_synthesis(
+            results, content_map=content_map, numbering=url_to_id,
+        )
         sections_text.append(
             f"## Section: {section}\nDescription: {description}\nFindings:\n{results_text}"
         )
-    
+
     sections_block = "\n\n".join(sections_text)
     outline_str = "\n".join(f"- {item['section']}: {item['description']}" for item in outline)
 
-    system = """You are a research synthesis specialist. Write a comprehensive, well-structured research report following the provided outline.
+    system = f"""You are a research synthesis specialist. Write a comprehensive, well-structured research report following the provided outline.
 
 CRITICAL: Begin your response directly with the report content (e.g. the title or introduction). Do NOT include any preamble, meta-commentary, or statements like "Here is the report" or "I'll compile the findings."
 
@@ -748,13 +927,7 @@ Write a thorough research report that:
 5. Has substantive content in each section
 6. Ends with a conclusion summarizing key findings
 
-Citation format — use numbered references [1], [2], etc. inline. At the end of the report include a "References" section listing each cited source with:
-- The reference number
-- Author or organisation name (if identifiable from the content)
-- Title of the page or article
-- URL
-- Year or access date if available
-For example: [1] de Cabo, R. & Mattson, M. — "Effects of Intermittent Fasting on Health" — https://example.com — 2019
+{_SYNTHESIS_CITATION_RULES}
 
 The report should be detailed and comprehensive.
 Make it as long as necessary to cover all the information gathered.
@@ -772,6 +945,8 @@ Proofread for grammar, spelling, and consistency before finishing."""
         )
 
         async def _web_search(query: str) -> str:
+            # Tool-search results are not in the numbered registry, so the
+            # model cannot cite them — they are background context only.
             results = await search_searxng(query=query, max_results=results_per_query)
             return format_results_for_synthesis(results)
 
@@ -784,8 +959,6 @@ Proofread for grammar, spelling, and consistency before finishing."""
         )
         extra_searches = completion.get("tool_calls_made", 0)
     else:
-        # Non-agentic: use plain context messages to avoid priming the
-        # model with a tool-call pattern that can cause spurious output.
         messages = build_context_messages(
             system=system,
             user=user,
@@ -796,8 +969,9 @@ Proofread for grammar, spelling, and consistency before finishing."""
         )
         extra_searches = 0
 
+    essay = _finalize_essay_citations(completion["content"], ordered_sources)
     usage = TokenUsage.model_validate(completion["usage"] or {})
-    return completion["content"], usage, extra_searches
+    return essay, usage, extra_searches
 
 
 
@@ -1813,16 +1987,42 @@ async def supervised_deep_research(
     # Step 4: Synthesize essay from researcher findings
     _progress("synthesis", "Synthesizing final essay from researcher findings")
 
+    # Build a global numbered source registry from all results gathered by
+    # researchers, then translate any [URL] markers in the prose findings to
+    # the corresponding [N] so the synthesizer only ever sees citable IDs.
+    section_results_for_registry: dict[str, list[SearchResult]] = {}
+    for item, output in zip(outline, researcher_outputs):
+        if isinstance(output, Exception):
+            section_results_for_registry[item["section"]] = []
+        else:
+            section_results_for_registry[item["section"]] = output["results"]
+    url_to_id, ordered_sources = _build_source_registry(
+        outline, section_results_for_registry, extra_results=unique_results,
+    )
+
+    sources_block = format_results_for_synthesis(
+        ordered_sources, content_map=combined_content_map, numbering=url_to_id,
+    )
+
+    findings_with_numbers = {
+        section: _replace_url_citations(text, url_to_id)
+        for section, text in researcher_findings.items()
+    }
     findings_block = "\n\n".join(
         f"## Section: {item['section']}\nDescription: {item['description']}\n"
-        f"Researcher Findings:\n{researcher_findings.get(item['section'], 'No findings.')}"
+        f"Researcher Findings:\n{findings_with_numbers.get(item['section'], 'No findings.')}"
         for item in outline
+    )
+    synthesis_context = (
+        "Numbered sources (cite ONLY by these [N] numbers):\n\n"
+        f"{sources_block}\n\n---\n\n"
+        f"Per-section researcher findings:\n\n{findings_block}"
     )
     outline_str = "\n".join(
         f"- {item['section']}: {item['description']}" for item in outline
     )
 
-    system = """You are a research synthesis specialist. Write a comprehensive, well-structured research report from the findings gathered by multiple research agents.
+    system = f"""You are a research synthesis specialist. Write a comprehensive, well-structured research report from the findings gathered by multiple research agents.
 
 CRITICAL: Begin your response directly with the report content (e.g. the title or introduction). Do NOT include any preamble, meta-commentary, or statements like "Here is the report" or "I'll compile the findings."
 
@@ -1834,13 +2034,7 @@ Write a thorough research report that:
 5. Has substantive content in each section
 6. Ends with a conclusion summarizing key findings
 
-Citation format — use numbered references [1], [2], etc. inline. At the end of the report include a "References" section listing each cited source with:
-- The reference number
-- Author or organisation name (if identifiable from the content)
-- Title of the page or article
-- URL
-- Year or access date if available
-For example: [1] de Cabo, R. & Mattson, M. — "Effects of Intermittent Fasting on Health" — https://example.com — 2019
+{_SYNTHESIS_CITATION_RULES}
 
 The report should be detailed and comprehensive.
 Make it as long as necessary to cover all the information gathered.
@@ -1852,7 +2046,7 @@ Proofread for grammar, spelling, and consistency before finishing."""
         messages = build_tool_messages(
             system=system,
             user=user,
-            tool_content=findings_block,
+            tool_content=synthesis_context,
         )
 
         async def _web_search(query: str) -> str:
@@ -1871,19 +2065,19 @@ Proofread for grammar, spelling, and consistency before finishing."""
         messages = build_context_messages(
             system=system,
             user=user,
-            context=findings_block,
+            context=synthesis_context,
         )
         completion = await chat_completion(
             messages=messages, model=settings.summary_model, max_tokens=max_tokens
         )
         extra_searches = 0
 
-    essay = completion["content"]
+    essay = _finalize_essay_citations(completion["content"], ordered_sources)
     _merge_usage(total_usage, completion["usage"])
     total_search_requests += extra_searches
 
     # Estimate citation tokens
-    citation_chars = len(findings_block)
+    citation_chars = len(synthesis_context)
     total_usage.citation_tokens = citation_chars // 4 if citation_chars else 0
     total_usage.search_requests = total_search_requests
 
